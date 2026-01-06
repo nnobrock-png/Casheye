@@ -33,8 +33,18 @@ import java.util.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.foundation.background
+import java.time.format.DateTimeFormatter
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+
+import androidx.compose.material.icons.filled.Add
+
+
+
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -42,13 +52,15 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             CasheyeTheme {
-                Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
-                    CashEyeApp(modifier = Modifier.padding(innerPadding))
+                Surface {
+                    CashEyeApp()
                 }
             }
         }
     }
 }
+
+
 
 // --- CSVエクスポート ---
 fun exportExpensesToCSV(context: Context, expenses: List<Expense>) {
@@ -95,8 +107,8 @@ fun CsvImportSection(
                 label = { Text("ここにCSVデータを貼り付け") },
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(120.dp),
-                maxLines = 6
+                    .height(80.dp),
+                maxLines = 3
             )
             Spacer(Modifier.height(8.dp))
             Button(
@@ -117,26 +129,32 @@ fun CsvImportSection(
 
 @Composable
 fun CashEyeApp(modifier: Modifier = Modifier) {
+
     val context = LocalContext.current
+
     var expenses by remember { mutableStateOf<List<Expense>>(emptyList()) }
     var recurringTransactions by remember { mutableStateOf<List<RecurringTransaction>>(emptyList()) }
     var selectedTab by remember { mutableIntStateOf(0) }
     var editingExpense by remember { mutableStateOf<Expense?>(null) }
 
-    // 設定値の読み込み
+    // ★ 手入力ダイアログ制御
+    var showAddDialog by remember { mutableStateOf(false) }
+
     val prefs = context.getSharedPreferences("casheye_prefs", Context.MODE_PRIVATE)
     var startYear by remember { mutableIntStateOf(prefs.getInt("start_year", 2025)) }
     var startMonth by remember { mutableIntStateOf(prefs.getInt("start_month", 1)) }
 
-    val runAutoRecord = {
-        val updated = recordRecurringTransactionsIfNeeded(context, expenses, recurringTransactions)
-        if (updated != null) expenses = updated
-    }
+    val today = LocalDate.now()
+    var baseDate by remember { mutableStateOf(today) }
+
+    // ★ スワイプ量蓄積
+    var dragTotal by remember { mutableFloatStateOf(0f) }
 
     LaunchedEffect(Unit) {
         expenses = loadExpenses(context)
         recurringTransactions = loadRecurringTransactions(context)
-        runAutoRecord()
+        recordRecurringTransactionsIfNeeded(context, expenses, recurringTransactions)
+            ?.let { expenses = it }
     }
 
     val onUpdate: (Expense, Expense) -> Unit = { old, new ->
@@ -150,95 +168,218 @@ fun CashEyeApp(modifier: Modifier = Modifier) {
         saveExpenses(context, expenses)
     }
 
-    Column(modifier = modifier.padding(8.dp)) {
+    // =============================
+    // ★★★ 全体を Box で包む ★★★
+    // =============================
+    Box(
+        modifier = modifier.fillMaxSize()
+    ) {
 
-        CsvImportSection { csv ->
-            val imported = parseCsv(csv)
-            if (imported.isNotEmpty()) {
-                expenses = (expenses + imported)
-                    .distinctBy { "${it.date}-${it.name}-${it.priceIncludeTax}" }
-                    .sortedByDescending { it.date }
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(8.dp)
+                .pointerInput(selectedTab) {
+                    detectHorizontalDragGestures(
+                        onDragEnd = { dragTotal = 0f }
+                    ) { _, dragAmount ->
+                        dragTotal += dragAmount
+                        val threshold = 120f
 
-                saveExpenses(context, expenses)
+                        if (dragTotal > threshold) {
+                            // 👉 右スワイプ → 未来
+                            baseDate = if (selectedTab == 2)
+                                baseDate.plusYears(1)
+                            else
+                                baseDate.plusMonths(1)
+                            dragTotal = 0f
+                        } else if (dragTotal < -threshold) {
+                            // 👈 左スワイプ → 過去
+                            baseDate = if (selectedTab == 2)
+                                baseDate.minusYears(1)
+                            else
+                                baseDate.minusMonths(1)
+                            dragTotal = 0f
+                        }
+                    }
+                }
+        ) {
+
+            /* ======== 上部サマリー ======== */
+
+            val baseMonth = YearMonth.from(baseDate)
+            val baseYear = baseDate.year
+
+            val filteredExpenses = when (selectedTab) {
+                0, 1 -> expenses.filter { YearMonth.from(it.date) == baseMonth }
+                2 -> expenses.filter { it.date.year == baseYear }
+                else -> expenses
+            }
+
+            val totalInc = filteredExpenses.filter { it.isIncome }.sumOf { it.priceIncludeTax }
+            val totalExp = filteredExpenses.filter { !it.isIncome }.sumOf { it.priceIncludeTax }
+
+            val title = when (selectedTab) {
+                0, 1 -> "${baseMonth.year}年${baseMonth.monthValue}月の累計"
+                2 -> "${baseYear}年の累計"
+                else -> "累計"
+            }
+
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 8.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant
+                )
+            ) {
+                Column(Modifier.padding(16.dp)) {
+
+                    Text(title, fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
+                    Spacer(Modifier.height(4.dp))
+
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            "¥%,d".format(totalInc - totalExp),
+                            fontSize = 24.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        IconButton(onClick = { exportExpensesToCSV(context, expenses) }) {
+                            Icon(Icons.Default.Share, contentDescription = "共有")
+                        }
+                    }
+
+                    Spacer(Modifier.height(10.dp))
+
+                    Row(Modifier.fillMaxWidth()) {
+                        Column(Modifier.weight(1f)) {
+                            Text("収入合計", fontSize = 10.sp)
+                            Text("¥%,d".format(totalInc), fontWeight = FontWeight.Bold)
+                        }
+                        Column(Modifier.weight(1f)) {
+                            Text("支出合計", fontSize = 10.sp)
+                            Text("¥%,d".format(totalExp), fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+            }
+
+            /* ======== タブ ======== */
+
+            val tabs = listOf("日別", "月別", "年別", "明細", "分析", "グラフ", "設定")
+
+            ScrollableTabRow(selectedTabIndex = selectedTab) {
+                tabs.forEachIndexed { index, title ->
+                    Tab(selected = selectedTab == index, onClick = { selectedTab = index }) {
+                        Text(title, modifier = Modifier.padding(12.dp))
+                    }
+                }
+            }
+
+            /* ======== 中身 ======== */
+
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+                    .navigationBarsPadding()
+            ) {
+                when (selectedTab) {
+                    0 -> DailyScreen(
+                        expenses = expenses,
+                        onImportCsv = { csvText ->
+                            val imported = parseCsvToExpenses(csvText)
+                            if (imported.isNotEmpty()) {
+                                expenses = imported + expenses
+                                saveExpenses(context, expenses)
+                            }
+                        },
+                        onDelete = onDelete,
+                        onEdit = { editingExpense = it }
+                    )
+
+                    1 -> HierarchicalExpenseList(expenses, "month", onDelete) { editingExpense = it }
+                    2 -> HierarchicalExpenseList(expenses, "year", onDelete) { editingExpense = it }
+                    3 -> FullHistoryDatabaseScreen(expenses, onDelete) { editingExpense = it }
+                    4 -> AnalysisScreen(expenses)
+                    5 -> ChartScreen(expenses)
+                    6 -> SettingsScreen(recurringTransactions, startYear, startMonth, { _, _ -> }, {}, {}, {})
+                }
             }
         }
 
-        val (totalInc, totalExp) = calculateBalance(expenses)
+        /* ======== ★ FAB（右下固定） ======== */
 
-        Card(modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
-            Column(Modifier.padding(16.dp)) {
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                    Column {
-                        Text("現在の総残高", fontSize = 11.sp, color = MaterialTheme.colorScheme.outline)
-                        Text("¥%,d".format(totalInc - totalExp), fontSize = 24.sp, fontWeight = FontWeight.Bold)
-                    }
-                    IconButton(onClick = { exportExpensesToCSV(context, expenses) }) {
-                        Icon(Icons.Default.Share, contentDescription = "共有")
-                    }
-                }
-                Spacer(modifier = Modifier.height(10.dp))
-                Row(Modifier.fillMaxWidth()) {
-                    Column(Modifier.weight(1f)) {
-                        Text("収入合計", fontSize = 10.sp, color = MaterialTheme.colorScheme.primary)
-                        Text("¥%,d".format(totalInc), fontSize = 15.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
-                    }
-                    Column(Modifier.weight(1f)) {
-                        Text("支出合計", fontSize = 10.sp, color = MaterialTheme.colorScheme.error)
-                        Text("¥%,d".format(totalExp), fontSize = 15.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.error)
-                    }
-                }
+        if (selectedTab != 6) { // 設定タブでは非表示なども可能
+            FloatingActionButton(
+                onClick = { showAddDialog = true },
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(16.dp)
+                    .navigationBarsPadding()
+            ) {
+                Icon(Icons.Default.Add, contentDescription = "手入力で追加")
             }
-        }
-
-        val tabs = listOf("日別", "月別", "年別", "明細", "グラフ", "設定") // グラフを割り込ませました
-        ScrollableTabRow(selectedTabIndex = selectedTab, edgePadding = 0.dp) {
-            tabs.forEachIndexed { index, title ->
-                Tab(selected = selectedTab == index, onClick = { selectedTab = index }) {
-                    Text(title, modifier = Modifier.padding(12.dp), fontSize = 13.sp)
-                }
-            }
-        }
-
-        when (selectedTab) {
-            0 -> HierarchicalExpenseList(expenses, "date", onDelete, onEdit = { editingExpense = it })
-            1 -> HierarchicalExpenseList(expenses, "month", onDelete, onEdit = { editingExpense = it })
-            2 -> HierarchicalExpenseList(expenses, "year", onDelete, onEdit = { editingExpense = it })
-            3 -> FullHistoryDatabaseScreen(expenses, onDelete, onEdit = { editingExpense = it })
-            4 -> ChartScreen(expenses)
-            5 -> SettingsScreen(
-                recurringTransactions = recurringTransactions,
-                startYear = startYear,
-                startMonth = startMonth,
-                onStartSettingsChange = { y, m ->
-                    startYear = y; startMonth = m
-                    prefs.edit().putInt("start_year", y).putInt("start_month", m).apply()
-                },
-                onAdd = { new ->
-                    recurringTransactions = recurringTransactions + new
-                    saveRecurringTransactions(context, recurringTransactions)
-                    runAutoRecord()
-                },
-                onDelete = { target ->
-                    recurringTransactions = recurringTransactions.filter { it.id != target.id }
-                    saveRecurringTransactions(context, recurringTransactions)
-                },
-                onUpdateRecurring = { updated ->
-                    recurringTransactions = recurringTransactions.map { if (it.id == updated.id) updated else it }
-                    saveRecurringTransactions(context, recurringTransactions)
-                }
-            )
         }
     }
 
-    editingExpense?.let { target ->
-        EditExpenseDialog(expense = target, onDismiss = { editingExpense = null }, onSave = { updated -> onUpdate(target, updated) })
+    /* ======== ダイアログ群 ======== */
+
+    editingExpense?.let {
+        EditExpenseDialog(it, { editingExpense = null }) { updated ->
+            onUpdate(it, updated)
+        }
+    }
+
+    if (showAddDialog) {
+        AddExpenseDialog(
+            onDismiss = { showAddDialog = false },
+            onAdd = { expense ->
+                expenses = expenses + expense
+                saveExpenses(context, expenses)
+                showAddDialog = false
+            }
+        )
     }
 }
 
+
 @Composable
-fun HierarchicalExpenseList(expenses: List<Expense>, type: String, onDelete: (Expense) -> Unit, onEdit: (Expense) -> Unit) {
+fun DailyScreen(
+    expenses: List<Expense>,
+    onImportCsv: (String) -> Unit,
+    onDelete: (Expense) -> Unit,
+    onEdit: (Expense) -> Unit
+) {
+    Column {
+        // ✅ CSV取り込みは日別だけ
+        CsvImportSection(onImport = onImportCsv)
+
+        HierarchicalExpenseList(
+            expenses = expenses,
+            type = "date",
+            onDelete = onDelete,
+            onEdit = onEdit
+        )
+    }
+}
+
+
+@Composable
+fun HierarchicalExpenseList(
+    expenses: List<Expense>,
+    type: String,
+    onDelete: (Expense) -> Unit,
+    onEdit: (Expense) -> Unit
+) {
     var expandedHeaders by remember { mutableStateOf(setOf<String>()) }
     var expandedMajors by remember { mutableStateOf(setOf<String>()) }
+    var expandedMinors by remember { mutableStateOf(setOf<String>()) }
+
     val grouped = when (type) {
         "date" -> expenses.groupBy { it.date.toString() }
         "month" -> expenses.groupBy { YearMonth.from(it.date).toString() }
@@ -246,40 +387,97 @@ fun HierarchicalExpenseList(expenses: List<Expense>, type: String, onDelete: (Ex
     }.toSortedMap(compareByDescending { it })
 
     LazyColumn(Modifier.fillMaxSize()) {
+
         grouped.forEach { (header, listForHeader) ->
+
+            // ===== ヘッダ =====
             item {
                 val (inc, exp) = calculateBalance(listForHeader)
                 Surface(
-                    modifier = Modifier.fillMaxWidth().clickable {
-                        expandedHeaders = if (expandedHeaders.contains(header)) expandedHeaders - header else expandedHeaders + header
-                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable {
+                            expandedHeaders =
+                                if (expandedHeaders.contains(header))
+                                    expandedHeaders - header
+                                else
+                                    expandedHeaders + header
+                        },
                     color = MaterialTheme.colorScheme.surfaceVariant
                 ) {
                     Column(Modifier.padding(12.dp)) {
-                        Text(header, fontWeight = FontWeight.Bold, fontSize = 15.sp)
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                            Text("入: ¥%,d".format(inc), fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
-                            Text("出: ¥%,d".format(exp), fontSize = 12.sp, color = MaterialTheme.colorScheme.error)
+                        Text(header, fontWeight = FontWeight.Bold)
+                        Row {
+                            Text("入: ¥%,d".format(inc), color = MaterialTheme.colorScheme.primary)
+                            Spacer(Modifier.width(16.dp))
+                            Text("出: ¥%,d".format(exp), color = MaterialTheme.colorScheme.error)
                         }
                     }
                 }
             }
+
             if (expandedHeaders.contains(header)) {
-                listForHeader.groupBy { it.majorCategory }.forEach { (major, mList) ->
+
+                // ===== 大分類 =====
+                listForHeader.groupBy { it.majorCategory }.forEach { (major, majorList) ->
                     val majorKey = "$header-$major"
+
                     item {
-                        Surface(modifier = Modifier.fillMaxWidth().clickable {
-                            expandedMajors = if (expandedMajors.contains(majorKey)) expandedMajors - majorKey else expandedMajors + majorKey
-                        }) {
-                            Row(Modifier.padding(start = 24.dp, top = 8.dp, bottom = 8.dp, end = 16.dp), horizontalArrangement = Arrangement.SpaceBetween) {
-                                Text(if (expandedMajors.contains(majorKey)) "▼ $major" else "▶ $major", fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-                                Text("%,d 円".format(mList.sumOf { it.priceIncludeTax }), fontSize = 14.sp)
+                        Surface(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    expandedMajors =
+                                        if (expandedMajors.contains(majorKey))
+                                            expandedMajors - majorKey
+                                        else
+                                            expandedMajors + majorKey
+                                }
+                        ) {
+                            Row(
+                                Modifier.padding(start = 24.dp, top = 8.dp, bottom = 8.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text("▶ $major", fontWeight = FontWeight.SemiBold)
+                                Text("¥%,d".format(majorList.sumOf { it.priceIncludeTax }))
                             }
                         }
                     }
+
                     if (expandedMajors.contains(majorKey)) {
-                        items(mList) { expense ->
-                            ExpenseItemRow(expense, onDelete, onEdit, paddingStart = 44.dp)
+
+                        // ===== 中分類 =====
+                        majorList.groupBy { it.minorCategory }.forEach { (minor, minorList) ->
+                            val minorKey = "$majorKey-$minor"
+
+                            item {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable {
+                                            expandedMinors =
+                                                if (expandedMinors.contains(minorKey))
+                                                    expandedMinors - minorKey
+                                                else
+                                                    expandedMinors + minorKey
+                                        }
+                                        .padding(start = 40.dp, top = 6.dp, bottom = 6.dp)
+                                ) {
+                                    Text("・$minor", Modifier.weight(1f))
+                                    Text("¥%,d".format(minorList.sumOf { it.priceIncludeTax }))
+                                }
+                            }
+
+                            if (expandedMinors.contains(minorKey)) {
+                                items(minorList) { expense ->
+                                    ExpenseItemRow(
+                                        expense,
+                                        onDelete,
+                                        onEdit,
+                                        paddingStart = 56.dp
+                                    )
+                                }
+                            }
                         }
                     }
                 }
@@ -287,6 +485,7 @@ fun HierarchicalExpenseList(expenses: List<Expense>, type: String, onDelete: (Ex
         }
     }
 }
+
 
 @Composable
 fun FullHistoryDatabaseScreen(expenses: List<Expense>, onDelete: (Expense) -> Unit, onEdit: (Expense) -> Unit) {
@@ -635,4 +834,574 @@ fun ChartScreen(expenses: List<Expense>) {
             Text("この月の支出データはありません", color = MaterialTheme.colorScheme.outline)
         }
     }
+}
+
+@Composable
+fun MonthlyTableScreen(expenses: List<Expense>) {
+
+    // ---- 大分類の展開状態 ----
+    var expandedMajor by remember { mutableStateOf<String?>(null) }
+
+    // ---- 月次サマリー ----
+    val summaries = remember(expenses) {
+        buildMonthlySummaries(expenses)
+    }
+
+    val months = remember(summaries) {
+        summaries.map { it.yearMonth }
+    }
+
+    // 大分類一覧（支出のみ）
+    val majorCategories = remember(expenses) {
+        expenses
+            .filter { !it.isIncome }
+            .map { it.majorCategory }
+            .distinct()
+            .sorted()
+    }
+
+    Column(Modifier.fillMaxSize()) {
+
+        // ===== 月ヘッダ =====
+        Row(
+            Modifier
+                .horizontalScroll(rememberScrollState())
+                .padding(start = 100.dp)
+        ) {
+            months.forEach { month ->
+                Text(
+                    text = "${month.year}/${month.monthValue}",
+                    modifier = Modifier.width(90.dp),
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        }
+
+        HorizontalDivider()
+
+        // ===== 収入・支出・残高 =====
+        val summaryRows = listOf(
+            "収入" to { s: MonthlySummary -> s.incomeTotal },
+            "支出" to { s: MonthlySummary -> s.expenseTotal },
+            "残高" to { s: MonthlySummary -> s.balance }
+        )
+
+        summaryRows.forEach { (label, valueFunc) ->
+            Row {
+                Text(label, Modifier.width(100.dp).padding(4.dp))
+                Row(Modifier.horizontalScroll(rememberScrollState())) {
+                    summaries.forEach { s ->
+                        Text(
+                            text = "¥%,d".format(valueFunc(s)),
+                            modifier = Modifier.width(90.dp).padding(4.dp),
+                            fontWeight = FontWeight.Medium,
+                            color = when (label) {
+                                "収入" -> MaterialTheme.colorScheme.primary
+                                "支出" -> MaterialTheme.colorScheme.error
+                                else -> MaterialTheme.colorScheme.onSurface
+                            }
+                        )
+                    }
+                }
+            }
+        }
+
+        HorizontalDivider(thickness = 2.dp)
+
+        // ===== 大分類 =====
+        majorCategories.forEach { major ->
+
+            // --- 大分類行 ---
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable {
+                        expandedMajor =
+                            if (expandedMajor == major) null else major
+                    }
+                    .padding(vertical = 6.dp)
+            ) {
+                Text(
+                    text = major,
+                    modifier = Modifier.width(100.dp).padding(4.dp),
+                    fontWeight = FontWeight.Bold
+                )
+                Row(Modifier.horizontalScroll(rememberScrollState())) {
+                    summaries.forEach { s ->
+                        val value = s.majorCategoryTotals[major] ?: 0
+                        Text(
+                            text = if (value == 0) "–" else "¥%,d".format(value),
+                            modifier = Modifier.width(90.dp).padding(4.dp),
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    }
+                }
+            }
+
+            // ===== 中分類（展開時）=====
+            if (expandedMajor == major) {
+
+                // 中分類一覧
+                val minorCategories = expenses
+                    .filter { !it.isIncome && it.majorCategory == major }
+                    .map { it.minorCategory }
+                    .distinct()
+                    .sorted()
+
+                minorCategories.forEach { minor ->
+
+                    Row {
+                        Text(
+                            text = "・$minor",
+                            modifier = Modifier
+                                .width(100.dp)
+                                .padding(start = 8.dp, top = 2.dp, bottom = 2.dp),
+                            fontSize = 12.sp
+                        )
+
+                        Row(Modifier.horizontalScroll(rememberScrollState())) {
+                            months.forEach { month ->
+                                val value = expenses
+                                    .filter {
+                                        !it.isIncome &&
+                                                it.majorCategory == major &&
+                                                it.minorCategory == minor &&
+                                                YearMonth.from(it.date) == month
+                                    }
+                                    .sumOf { it.priceIncludeTax }
+
+                                Text(
+                                    text = if (value == 0) "–" else "¥%,d".format(value),
+                                    modifier = Modifier.width(90.dp).padding(2.dp),
+                                    fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.error
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+
+
+fun buildMonthlySummaries(
+    expenses: List<Expense>
+): List<MonthlySummary> {
+
+    return expenses
+        .groupBy { YearMonth.from(it.date) }
+        .map { (ym, list) ->
+
+            val income = list
+                .filter { it.isIncome }
+                .sumOf { it.priceIncludeTax }
+
+            val expense = list
+                .filter { !it.isIncome }
+                .sumOf { it.priceIncludeTax }
+
+            val majorTotals = list
+                .filter { !it.isIncome }
+                .groupBy { it.majorCategory }
+                .mapValues { entry ->
+                    entry.value.sumOf { it.priceIncludeTax }
+                }
+
+            MonthlySummary(
+                yearMonth = ym,
+                incomeTotal = income,
+                expenseTotal = expense,
+                balance = income - expense,
+                majorCategoryTotals = majorTotals
+            )
+        }
+        .sortedBy { it.yearMonth }
+}
+
+
+@Composable
+fun AnalysisTableSkeleton(
+    rows: List<String>,
+    columns: List<String>,
+    onRowClick: ((String) -> Unit)? = null,
+    valueAt: (row: String, column: String) -> Int
+) {
+    val labelWidth = 120.dp
+    val cellWidth = 100.dp
+    val horizontalScrollState = rememberScrollState()
+
+    Column(
+        modifier = Modifier.fillMaxWidth()
+    ) {
+
+        // ===== ヘッダー =====
+        Row {
+            Box(
+                modifier = Modifier
+                    .width(labelWidth)
+                    .height(48.dp)
+            )
+
+            Row(
+                modifier = Modifier.horizontalScroll(horizontalScrollState)
+            ) {
+                columns.forEach { column ->
+                    Text(
+                        text = column,
+                        modifier = Modifier
+                            .width(cellWidth)
+                            .padding(8.dp),
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+        }
+
+        Divider(thickness = 2.dp)
+
+        // ===== 本体 =====
+        LazyColumn(
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            items(rows) { rowLabel ->
+
+                Row {
+
+                    // ← 行ラベル（大分類など）
+                    Text(
+                        text = rowLabel,
+                        modifier = Modifier
+                            .width(labelWidth)
+                            .padding(8.dp)
+                            .clickable(enabled = onRowClick != null) {
+                                onRowClick?.invoke(rowLabel)
+                            }
+                    )
+
+                    // ← 月別セル
+                    Row(
+                        modifier = Modifier.horizontalScroll(horizontalScrollState)
+                    ) {
+                        columns.forEach { column ->
+                            val value = valueAt(rowLabel, column)
+
+                            Text(
+                                text = if (value == 0) "–" else "¥%,d".format(value),
+                                modifier = Modifier
+                                    .width(cellWidth)
+                                    .padding(8.dp)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun AnalysisScreen(expenses: List<Expense>) {
+
+    var selectedMajor by remember { mutableStateOf<String?>(null) }
+
+    val summaries = remember(expenses) {
+        buildMonthlySummaries(expenses)
+    }
+
+    val analysisResult = remember(expenses) {
+        buildAnalysisResult(expenses)
+    }
+
+    val columns = summaries.map {
+        "${it.yearMonth.year}/${it.yearMonth.monthValue}"
+    }
+
+    Column(modifier = Modifier.fillMaxSize()) {
+
+        // ===== 上段：収入・支出・残高 =====
+        Box(modifier = Modifier.weight(1f)) {
+            AnalysisTableSkeleton(
+                rows = listOf("収入", "支出", "残高"),
+                columns = columns
+            ) { row, column ->
+
+                val summary = summaries.firstOrNull {
+                    "${it.yearMonth.year}/${it.yearMonth.monthValue}" == column
+                } ?: return@AnalysisTableSkeleton 0
+
+                when (row) {
+                    "収入" -> summary.incomeTotal
+                    "支出" -> summary.expenseTotal
+                    "残高" -> summary.balance
+                    else -> 0
+                }
+            }
+        }
+
+        Divider(thickness = 3.dp)
+
+        // ===== 下段：大分類 or 中分類 =====
+        Box(modifier = Modifier.weight(2f)) {
+
+            if (selectedMajor == null) {
+                // ---- 大分類一覧 ----
+                AnalysisTableSkeleton(
+                    rows = analysisResult.keys.sorted(),
+                    columns = columns,
+                    onRowClick = { major: String ->
+                        selectedMajor = major
+                    },
+                    valueAt = { row: String, column: String ->
+                        analysisResult[row]?.get(column) ?: 0
+                    }
+                )
+
+
+
+            } else {
+                // ---- 中分類ドリルダウン ----
+                val subResult = remember(selectedMajor) {
+                    buildSubCategoryAnalysis(expenses, selectedMajor!!)
+                }
+
+                Column {
+
+                    // ← 戻る
+                    Text(
+                        "← 大分類へ戻る",
+                        modifier = Modifier
+                            .padding(8.dp)
+                            .clickable { selectedMajor = null }
+                    )
+
+                    AnalysisTableSkeleton(
+                        rows = subResult.keys.sorted(),
+                        columns = columns,
+                        onRowClick = null,
+                        valueAt = { row: String, column: String ->
+                            subResult[row]?.get(column) ?: 0
+                        }
+                    )
+
+                }
+            }
+        }
+    }
+}
+
+
+
+@Composable
+fun AnalysisTableScreen(
+    analysisResult: Map<String, Map<String, Int>>
+) {
+    val rows = analysisResult.keys.toList()
+    val columns = analysisResult.values
+        .flatMap { it.keys }
+        .distinct()
+
+    AnalysisTableSkeleton(
+        rows = rows,
+        columns = columns,
+        valueAt = { row, column ->
+            analysisResult[row]?.get(column) ?: 0
+        }
+    )
+}
+
+
+fun buildAnalysisResult(
+    expenses: List<Expense>
+): Map<String, Map<String, Int>> {
+
+    return expenses
+        .filter { !it.isIncome }
+        .groupBy { it.majorCategory }
+        .mapValues { (_, list) ->
+            list.groupBy { YearMonth.from(it.date) }
+                .mapValues { entry ->
+                    entry.value.sumOf { it.priceIncludeTax }
+                }
+                .mapKeys { (ym, _) ->
+                    "${ym.year}/${ym.monthValue}"
+                }
+        }
+}
+
+@Composable
+fun MajorCategoryAnalysisTable(expenses: List<Expense>) {
+    // expenses → 月別 × 大分類 集計
+    // AnalysisTableSkeleton に流す
+}
+
+fun buildMajorCategoryMonthlyTable(
+    expenses: List<Expense>
+): Pair<List<String>, Map<String, Map<String, Int>>> {
+
+    val monthKeys = expenses
+        .map { YearMonth.from(it.date) }
+        .distinct()
+        .sorted()
+        .map { "${it.year}/${it.monthValue}" }
+
+    val table = expenses
+        .filter { !it.isIncome }
+        .groupBy { it.majorCategory }
+        .mapValues { (_, list) ->
+            list
+                .groupBy { YearMonth.from(it.date) }
+                .mapValues { (_, monthList) ->
+                    monthList.sumOf { it.priceIncludeTax }
+                }
+                .mapKeys { (ym, _) ->
+                    "${ym.year}/${ym.monthValue}"
+                }
+        }
+
+    return monthKeys to table
+}
+
+fun buildSubCategoryAnalysis(
+    expenses: List<Expense>,
+    majorCategory: String
+): Map<String, Map<String, Int>> {
+
+    return expenses
+        .filter { !it.isIncome && it.majorCategory == majorCategory }
+        .groupBy { it.minorCategory }
+        .mapValues { (_, list) ->
+            list.groupBy { YearMonth.from(it.date) }
+                .mapValues { (_, items) ->
+                    items.sumOf { it.priceIncludeTax }
+                }
+                .mapKeys { (ym, _) ->
+                    "${ym.year}/${ym.monthValue}"
+                }
+        }
+}
+
+fun parseCsvToExpenses(csv: String): List<Expense> {
+
+    val formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd")
+
+    return csv
+        .replace("\uFEFF", "")
+        .replace("\r", "")
+        .lines()
+        .map { it.trim() }
+        .filter { it.isNotBlank() }   // ← これが決定打
+        .drop(1)                      // ← ここで初めてヘッダーを捨てられる
+        .mapNotNull { line ->
+
+            val cols = line.split(",")
+
+            if (cols.size < 7) return@mapNotNull null
+
+            try {
+                Expense(
+                    date = LocalDate.parse(cols[0].trim(), formatter),
+                    store = cols[1].trim(),
+                    name = cols[2].trim(),
+                    majorCategory = cols[3].trim(),
+                    minorCategory = cols[4].trim(),
+                    priceExcludeTax = cols[5].trim().toInt(),
+                    priceIncludeTax = cols[6].trim().toInt()
+                )
+            } catch (e: Exception) {
+                null
+            }
+        }
+}
+@Composable
+fun SummaryCard(
+    expenses: List<Expense>,
+    selectedTab: Int,
+    baseMonth: YearMonth,
+    baseYear: Int
+) {
+
+    val filteredExpenses = when (selectedTab) {
+        // 日別・月別 → 表示中の月
+        0, 1 -> expenses.filter {
+            YearMonth.from(it.date) == baseMonth
+        }
+
+        // 年別 → 表示中の年（1月〜12月）
+        2 -> expenses.filter {
+            it.date.year == baseYear
+        }
+
+        else -> expenses
+    }
+
+    val income = filteredExpenses
+        .filter { it.isIncome }
+        .sumOf { it.priceIncludeTax }
+
+    val expense = filteredExpenses
+        .filter { !it.isIncome }
+        .sumOf { it.priceIncludeTax }
+
+    val title = when (selectedTab) {
+        0, 1 -> "${baseMonth.year}年${baseMonth.monthValue}月の累計"
+        2 -> "${baseYear}年の累計"
+        else -> "累計"
+    }
+
+    SummaryCardUI(
+        title = title,
+        amount = income - expense
+    )
+}
+
+@Composable
+fun SummaryCardUI(
+    title: String,
+    amount: Int
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(8.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.primaryContainer
+        )
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp)
+        ) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.primary
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = "¥${"%,d".format(amount)}",
+                style = MaterialTheme.typography.headlineMedium,
+                fontWeight = FontWeight.Bold
+            )
+        }
+    }
+}
+
+
+@Composable
+fun AddExpenseDialog(
+    onDismiss: () -> Unit,
+    onSave: (Expense) -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("支出を追加") },
+        text = { Text("（ここに入力フォームが入ります）") },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("OK")
+            }
+        }
+    )
 }

@@ -31,3 +31,12 @@ data class RecurringTransaction(
     val endYearMonth: YearMonth? = null,
     val isIncome: Boolean = false  // ここにカンマやカッコのミスがあった可能性が高いです
 )
+
+data class MonthlySummary(
+    val yearMonth: YearMonth,
+    val incomeTotal: Int,
+    val expenseTotal: Int,
+    val balance: Int,
+    val majorCategoryTotals: Map<String, Int> = emptyMap()
+)
+
