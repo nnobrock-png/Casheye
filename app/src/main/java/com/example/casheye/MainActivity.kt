@@ -1,4 +1,10 @@
+@file:OptIn(ExperimentalMaterial3Api::class)
+
 package com.example.casheye
+
+
+
+
 
 import android.content.Context
 import android.content.Intent
@@ -43,6 +49,39 @@ import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 
 import androidx.compose.material.icons.filled.Add
 
+import androidx.compose.foundation.ScrollState
+import androidx.compose.foundation.rememberScrollState
+
+
+val categoryMap = mapOf(
+    "食費" to listOf(
+        "精肉", "魚介", "野菜", "果物", "パン",
+        "惣菜", "菓子", "飲料", "酒類", "調味料",
+        "インスタント食品", "乳製品", "冷凍食品", "その他食品"
+    ),
+    "日用品" to listOf(
+        "洗剤", "紙類", "消耗品", "文房具",
+        "キッチン用品", "バス・トイレ用品", "衛生用品"
+    ),
+    "車両費" to listOf(
+        "ガソリン", "駐車場代", "メンテナンス"
+    ),
+    "交通" to listOf(
+        "電車", "バス", "タクシー"
+    ),
+    "外食費" to listOf(
+        "昼食", "夕食", "カフェ", "テイクアウト"
+    ),
+    "医療費" to listOf(
+        "診療代", "薬代", "検査代"
+    ),
+    "保険代" to listOf(
+        "生命保険", "損害保険", "自動車保険"
+    ),
+    "収入" to listOf(
+        "給与", "副収入", "還付金"
+    )
+)
 
 
 
@@ -153,8 +192,6 @@ fun CashEyeApp(modifier: Modifier = Modifier) {
     LaunchedEffect(Unit) {
         expenses = loadExpenses(context)
         recurringTransactions = loadRecurringTransactions(context)
-        recordRecurringTransactionsIfNeeded(context, expenses, recurringTransactions)
-            ?.let { expenses = it }
     }
 
     val onUpdate: (Expense, Expense) -> Unit = { old, new ->
@@ -248,9 +285,16 @@ fun CashEyeApp(modifier: Modifier = Modifier) {
                             fontSize = 24.sp,
                             fontWeight = FontWeight.Bold
                         )
-                        IconButton(onClick = { exportExpensesToCSV(context, expenses) }) {
+                        IconButton(
+                            onClick = {
+                                val csv = exportExpensesToCsv(expenses)
+                                val file = saveCsvToCache(context, csv)
+                                shareCsv(context, file)
+                            }
+                        ) {
                             Icon(Icons.Default.Share, contentDescription = "共有")
                         }
+
                     }
 
                     Spacer(Modifier.height(10.dp))
@@ -519,65 +563,142 @@ fun ExpenseItemRow(expense: Expense, onDelete: (Expense) -> Unit, onEdit: (Expen
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun EditExpenseDialog(expense: Expense, onDismiss: () -> Unit, onSave: (Expense) -> Unit) {
-    var name by remember { mutableStateOf(expense.name) }
-    var store by remember { mutableStateOf(expense.store) }
-    var priceStr by remember { mutableStateOf(expense.priceIncludeTax.toString()) }
-    var major by remember { mutableStateOf(expense.majorCategory) }
-    var minor by remember { mutableStateOf(expense.minorCategory) }
+fun EditExpenseDialog(
+    expense: Expense,
+    onDismiss: () -> Unit,
+    onSave: (Expense) -> Unit
+) {
+    var name by remember(expense) { mutableStateOf(expense.name) }
+    var store by remember(expense) { mutableStateOf(expense.store) }
+    var priceStr by remember(expense) { mutableStateOf(expense.priceIncludeTax.toString()) }
+    var major by remember(expense) { mutableStateOf(expense.majorCategory) }
+    var minor by remember(expense) { mutableStateOf(expense.minorCategory) }
+
+    var majorExpanded by remember { mutableStateOf(false) }
+    var minorExpanded by remember { mutableStateOf(false) }
+
+    val minorList = categoryMap[major] ?: emptyList()
+
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("明細を修正") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedTextField(value = name, onValueChange = { name = it }, label = { Text("商品名") })
-                OutlinedTextField(value = store, onValueChange = { store = it }, label = { Text("店舗名") })
-                OutlinedTextField(value = priceStr, onValueChange = { priceStr = it }, label = { Text("税込価格") })
-                OutlinedTextField(value = major, onValueChange = { major = it }, label = { Text("大分類") })
-                OutlinedTextField(value = minor, onValueChange = { minor = it }, label = { Text("中分類") })
+
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    label = { Text("商品名") }
+                )
+
+                OutlinedTextField(
+                    value = store,
+                    onValueChange = { store = it },
+                    label = { Text("店舗名") }
+                )
+
+                OutlinedTextField(
+                    value = priceStr,
+                    onValueChange = { priceStr = it },
+                    label = { Text("税込価格") }
+                )
+
+                // ▼ 大分類ドロップダウン
+                ExposedDropdownMenuBox(
+                    expanded = majorExpanded,
+                    onExpandedChange = { majorExpanded = !majorExpanded }
+                ) {
+                    OutlinedTextField(
+                        value = major,
+                        onValueChange = {},
+                        readOnly = true,
+                        label = { Text("大分類") },
+                        trailingIcon = {
+                            ExposedDropdownMenuDefaults.TrailingIcon(majorExpanded)
+                        },
+                        modifier = Modifier.menuAnchor()
+                    )
+
+                    ExposedDropdownMenu(
+                        expanded = majorExpanded,
+                        onDismissRequest = { majorExpanded = false }
+                    ) {
+                        categoryMap.keys.forEach { category ->
+                            DropdownMenuItem(
+                                text = { Text(category) },
+                                onClick = {
+                                    major = category
+                                    minor = ""   // ★ 大分類変更時は中分類リセット
+                                    majorExpanded = false
+                                }
+                            )
+                        }
+                    }
+                }
+
+                // ▼ 中分類ドロップダウン
+                ExposedDropdownMenuBox(
+                    expanded = minorExpanded,
+                    onExpandedChange = {
+                        if (minorList.isNotEmpty()) {
+                            minorExpanded = !minorExpanded
+                        }
+                    }
+                ) {
+                    OutlinedTextField(
+                        value = minor,
+                        onValueChange = {},
+                        readOnly = true,
+                        enabled = minorList.isNotEmpty(),
+                        label = { Text("中分類") },
+                        trailingIcon = {
+                            ExposedDropdownMenuDefaults.TrailingIcon(minorExpanded)
+                        },
+                        modifier = Modifier.menuAnchor()
+                    )
+
+                    ExposedDropdownMenu(
+                        expanded = minorExpanded,
+                        onDismissRequest = { minorExpanded = false }
+                    ) {
+                        minorList.forEach { m ->
+                            DropdownMenuItem(
+                                text = { Text(m) },
+                                onClick = {
+                                    minor = m
+                                    minorExpanded = false
+                                }
+                            )
+                        }
+                    }
+                }
             }
         },
         confirmButton = {
             Button(onClick = {
                 val newPrice = priceStr.toIntOrNull() ?: expense.priceIncludeTax
-                onSave(expense.copy(name = name, store = store, priceIncludeTax = newPrice, majorCategory = major, minorCategory = minor))
-            }) { Text("保存") }
-        },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("キャンセル") } }
-    )
-}
 
-fun calculateBalance(list: List<Expense>): Pair<Int, Int> {
-    val inc = list.filter { it.isIncome }.sumOf { it.priceIncludeTax }
-    val exp = list.filter { !it.isIncome }.sumOf { it.priceIncludeTax }
-    return Pair(inc, exp)
-}
-
-fun recordRecurringTransactionsIfNeeded(context: Context, currentExpenses: List<Expense>, recurringTransactions: List<RecurringTransaction>): List<Expense>? {
-    if (recurringTransactions.isEmpty()) return null
-    val newGenerated = mutableListOf<Expense>()
-    val today = LocalDate.now()
-    val currentMonth = YearMonth.from(today)
-    val existingKeys = currentExpenses.map { "${it.date}-${it.name}-${it.priceIncludeTax}" }.toSet()
-    recurringTransactions.forEach { transaction ->
-        var month = transaction.startYearMonth
-        while (!month.isAfter(currentMonth)) {
-            val day = transaction.dayOfMonth.coerceIn(1, month.lengthOfMonth())
-            val targetDate = month.atDay(day)
-            if (targetDate.isAfter(today)) break
-            val key = "${targetDate}-${transaction.title}-${transaction.amount}"
-            if (!existingKeys.contains(key)) {
-                newGenerated.add(Expense(targetDate, "定期", transaction.title, if (transaction.isIncome) "収入" else transaction.majorCategory, transaction.minorCategory, transaction.amount, transaction.amount))
+                onSave(
+                    expense.copy(
+                        name = name,
+                        store = store,
+                        priceIncludeTax = newPrice,
+                        majorCategory = major,
+                        minorCategory = minor
+                    )
+                )
+            }) {
+                Text("保存")
             }
-            month = month.plusMonths(1)
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("キャンセル")
+            }
         }
-    }
-    return if (newGenerated.isNotEmpty()) {
-        val updated = (currentExpenses + newGenerated).sortedByDescending { it.date }
-        saveExpenses(context, updated)
-        updated
-    } else null
+    )
 }
 
 @Composable
@@ -629,8 +750,85 @@ fun SettingsScreen(
             Text("定期収支の新規登録", fontWeight = FontWeight.Bold, fontSize = 18.sp)
             OutlinedTextField(value = title, onValueChange = { title = it }, label = { Text("項目名") }, modifier = Modifier.fillMaxWidth())
             OutlinedTextField(value = amount, onValueChange = { amount = it }, label = { Text("金額") }, modifier = Modifier.fillMaxWidth())
-            OutlinedTextField(value = major, onValueChange = { major = it }, label = { Text("大分類") }, modifier = Modifier.fillMaxWidth())
-            OutlinedTextField(value = minor, onValueChange = { minor = it }, label = { Text("中分類") }, modifier = Modifier.fillMaxWidth())
+            var majorExpanded by remember { mutableStateOf(false) }
+            var minorExpanded by remember { mutableStateOf(false) }
+
+            val minorList = categoryMap[major] ?: emptyList()
+
+// ▼ 大分類
+            ExposedDropdownMenuBox(
+                expanded = majorExpanded,
+                onExpandedChange = { majorExpanded = !majorExpanded }
+            ) {
+                OutlinedTextField(
+                    value = major,
+                    onValueChange = {},
+                    readOnly = true,
+                    label = { Text("大分類") },
+                    trailingIcon = {
+                        ExposedDropdownMenuDefaults.TrailingIcon(majorExpanded)
+                    },
+                    modifier = Modifier
+                        .menuAnchor()
+                        .fillMaxWidth()
+                )
+
+                ExposedDropdownMenu(
+                    expanded = majorExpanded,
+                    onDismissRequest = { majorExpanded = false }
+                ) {
+                    categoryMap.keys.forEach { category ->
+                        DropdownMenuItem(
+                            text = { Text(category) },
+                            onClick = {
+                                major = category
+                                minor = ""   // ★ 重要
+                                majorExpanded = false
+                            }
+                        )
+                    }
+                }
+            }
+
+// ▼ 中分類
+            ExposedDropdownMenuBox(
+                expanded = minorExpanded,
+                onExpandedChange = {
+                    if (minorList.isNotEmpty()) {
+                        minorExpanded = !minorExpanded
+                    }
+                }
+            ) {
+                OutlinedTextField(
+                    value = minor,
+                    onValueChange = {},
+                    readOnly = true,
+                    enabled = minorList.isNotEmpty(),
+                    label = { Text("中分類") },
+                    trailingIcon = {
+                        ExposedDropdownMenuDefaults.TrailingIcon(minorExpanded)
+                    },
+                    modifier = Modifier
+                        .menuAnchor()
+                        .fillMaxWidth()
+                )
+
+                ExposedDropdownMenu(
+                    expanded = minorExpanded,
+                    onDismissRequest = { minorExpanded = false }
+                ) {
+                    minorList.forEach { m ->
+                        DropdownMenuItem(
+                            text = { Text(m) },
+                            onClick = {
+                                minor = m
+                                minorExpanded = false
+                            }
+                        )
+                    }
+                }
+            }
+
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(if (isIncome) "種別：収入" else "種別：支出")
                 Switch(checked = isIncome, onCheckedChange = { isIncome = it })
@@ -710,8 +908,81 @@ fun SettingsScreen(
                         )
                     }
 
-                    OutlinedTextField(value = editMajor, onValueChange = { editMajor = it }, label = { Text("大分類") })
-                    OutlinedTextField(value = editMinor, onValueChange = { editMinor = it }, label = { Text("中分類") })
+                    var editMajorExpanded by remember { mutableStateOf(false) }
+                    var editMinorExpanded by remember { mutableStateOf(false) }
+
+                    val editMinorList = categoryMap[editMajor] ?: emptyList()
+
+// ▼ 大分類
+                    ExposedDropdownMenuBox(
+                        expanded = editMajorExpanded,
+                        onExpandedChange = { editMajorExpanded = !editMajorExpanded }
+                    ) {
+                        OutlinedTextField(
+                            value = editMajor,
+                            onValueChange = {},
+                            readOnly = true,
+                            label = { Text("大分類") },
+                            trailingIcon = {
+                                ExposedDropdownMenuDefaults.TrailingIcon(editMajorExpanded)
+                            },
+                            modifier = Modifier.menuAnchor()
+                        )
+
+                        ExposedDropdownMenu(
+                            expanded = editMajorExpanded,
+                            onDismissRequest = { editMajorExpanded = false }
+                        ) {
+                            categoryMap.keys.forEach { category ->
+                                DropdownMenuItem(
+                                    text = { Text(category) },
+                                    onClick = {
+                                        editMajor = category
+                                        editMinor = ""
+                                        editMajorExpanded = false
+                                    }
+                                )
+                            }
+                        }
+                    }
+
+// ▼ 中分類
+                    ExposedDropdownMenuBox(
+                        expanded = editMinorExpanded,
+                        onExpandedChange = {
+                            if (editMinorList.isNotEmpty()) {
+                                editMinorExpanded = !editMinorExpanded
+                            }
+                        }
+                    ) {
+                        OutlinedTextField(
+                            value = editMinor,
+                            onValueChange = {},
+                            readOnly = true,
+                            enabled = editMinorList.isNotEmpty(),
+                            label = { Text("中分類") },
+                            trailingIcon = {
+                                ExposedDropdownMenuDefaults.TrailingIcon(editMinorExpanded)
+                            },
+                            modifier = Modifier.menuAnchor()
+                        )
+
+                        ExposedDropdownMenu(
+                            expanded = editMinorExpanded,
+                            onDismissRequest = { editMinorExpanded = false }
+                        ) {
+                            editMinorList.forEach { m ->
+                                DropdownMenuItem(
+                                    text = { Text(m) },
+                                    onClick = {
+                                        editMinor = m
+                                        editMinorExpanded = false
+                                    }
+                                )
+                            }
+                        }
+                    }
+
 
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(if (editIsIncome) "種別：収入" else "種別：支出")
@@ -836,13 +1107,21 @@ fun ChartScreen(expenses: List<Expense>) {
     }
 }
 
-@Composable
-fun MonthlyTableScreen(expenses: List<Expense>) {
 
-    // ---- 大分類の展開状態 ----
+@Composable
+fun MonthlyTableScreen(
+    expenses: List<Expense>
+) {
+    // --- Context ---
+    val context = LocalContext.current
+
+    // --- 横スクロール（1本に統一）---
+    val horizontalScrollState = rememberScrollState()
+
+    // --- 大分類の展開状態 ---
     var expandedMajor by remember { mutableStateOf<String?>(null) }
 
-    // ---- 月次サマリー ----
+    // --- 月次サマリー ---
     val summaries = remember(expenses) {
         buildMonthlySummaries(expenses)
     }
@@ -851,7 +1130,11 @@ fun MonthlyTableScreen(expenses: List<Expense>) {
         summaries.map { it.yearMonth }
     }
 
-    // 大分類一覧（支出のみ）
+    val monthLabels = remember(months) {
+        months.map { "${it.year}/${it.monthValue}" }
+    }
+
+    // --- 大分類一覧（支出のみ）---
     val majorCategories = remember(expenses) {
         expenses
             .filter { !it.isIncome }
@@ -860,121 +1143,173 @@ fun MonthlyTableScreen(expenses: List<Expense>) {
             .sorted()
     }
 
-    Column(Modifier.fillMaxSize()) {
+    // ===== 縦スクロールは LazyColumn 1本 =====
+    LazyColumn(
+        modifier = Modifier.fillMaxSize()
+    ) {
 
-        // ===== 月ヘッダ =====
-        Row(
-            Modifier
-                .horizontalScroll(rememberScrollState())
-                .padding(start = 100.dp)
-        ) {
-            months.forEach { month ->
-                Text(
-                    text = "${month.year}/${month.monthValue}",
-                    modifier = Modifier.width(90.dp),
-                    fontWeight = FontWeight.Bold
-                )
-            }
-        }
-
-        HorizontalDivider()
-
-        // ===== 収入・支出・残高 =====
-        val summaryRows = listOf(
-            "収入" to { s: MonthlySummary -> s.incomeTotal },
-            "支出" to { s: MonthlySummary -> s.expenseTotal },
-            "残高" to { s: MonthlySummary -> s.balance }
-        )
-
-        summaryRows.forEach { (label, valueFunc) ->
-            Row {
-                Text(label, Modifier.width(100.dp).padding(4.dp))
-                Row(Modifier.horizontalScroll(rememberScrollState())) {
-                    summaries.forEach { s ->
-                        Text(
-                            text = "¥%,d".format(valueFunc(s)),
-                            modifier = Modifier.width(90.dp).padding(4.dp),
-                            fontWeight = FontWeight.Medium,
-                            color = when (label) {
-                                "収入" -> MaterialTheme.colorScheme.primary
-                                "支出" -> MaterialTheme.colorScheme.error
-                                else -> MaterialTheme.colorScheme.onSurface
-                            }
-                        )
-                    }
+        // ===== CSV書き出しボタン =====
+        item {
+            Button(
+                modifier = Modifier.padding(8.dp),
+                onClick = {
+                    val csv = exportMonthlyAnalysisToCsv(
+                        months = months,
+                        expenses = expenses
+                    )
+                    val file = saveCsvToCache(context, csv)
+                    shareCsv(context, file)
                 }
-            }
-        }
-
-        HorizontalDivider(thickness = 2.dp)
-
-        // ===== 大分類 =====
-        majorCategories.forEach { major ->
-
-            // --- 大分類行 ---
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable {
-                        expandedMajor =
-                            if (expandedMajor == major) null else major
-                    }
-                    .padding(vertical = 6.dp)
             ) {
-                Text(
-                    text = major,
-                    modifier = Modifier.width(100.dp).padding(4.dp),
-                    fontWeight = FontWeight.Bold
-                )
-                Row(Modifier.horizontalScroll(rememberScrollState())) {
-                    summaries.forEach { s ->
-                        val value = s.majorCategoryTotals[major] ?: 0
-                        Text(
-                            text = if (value == 0) "–" else "¥%,d".format(value),
-                            modifier = Modifier.width(90.dp).padding(4.dp),
-                            color = MaterialTheme.colorScheme.error
-                        )
-                    }
-                }
+                Text("月次CSVを書き出し")
             }
+        }
 
-            // ===== 中分類（展開時）=====
-            if (expandedMajor == major) {
+        // ===== ヘッダー（月）=====
+        item {
+            Row {
+                Box(
+                    modifier = Modifier
+                        .width(120.dp)
+                        .height(48.dp)
+                )
 
-                // 中分類一覧
-                val minorCategories = expenses
-                    .filter { !it.isIncome && it.majorCategory == major }
-                    .map { it.minorCategory }
-                    .distinct()
-                    .sorted()
-
-                minorCategories.forEach { minor ->
-
-                    Row {
+                Row(
+                    modifier = Modifier.horizontalScroll(horizontalScrollState)
+                ) {
+                    monthLabels.forEach { label ->
                         Text(
-                            text = "・$minor",
+                            text = label,
                             modifier = Modifier
                                 .width(100.dp)
-                                .padding(start = 8.dp, top = 2.dp, bottom = 2.dp),
-                            fontSize = 12.sp
+                                .padding(8.dp),
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+            }
+        }
+
+        item { Divider(thickness = 2.dp) }
+
+        // ===== 収入・支出・残高 =====
+        listOf("収入", "支出", "残高").forEach { rowLabel ->
+            item {
+                Row {
+
+                    Text(
+                        text = rowLabel,
+                        modifier = Modifier
+                            .width(120.dp)
+                            .padding(8.dp)
+                    )
+
+                    Row(
+                        modifier = Modifier.horizontalScroll(horizontalScrollState)
+                    ) {
+                        months.forEach { ym ->
+                            val summary = summaries.firstOrNull {
+                                it.yearMonth == ym
+                            }
+
+                            val value = when (rowLabel) {
+                                "収入" -> summary?.incomeTotal ?: 0
+                                "支出" -> summary?.expenseTotal ?: 0
+                                "残高" -> summary?.balance ?: 0
+                                else -> 0
+                            }
+
+                            Text(
+                                text = if (value == 0) "–" else "¥%,d".format(value),
+                                modifier = Modifier
+                                    .width(100.dp)
+                                    .padding(8.dp)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        item { Divider(thickness = 2.dp) }
+
+        // ===== 大分類・中分類 =====
+        items(majorCategories) { major ->
+
+            val isExpanded = expandedMajor == major
+
+            // --- 大分類行 ---
+            Row {
+                Text(
+                    text = if (isExpanded) "▼ $major" else "▶ $major",
+                    modifier = Modifier
+                        .width(120.dp)
+                        .padding(8.dp)
+                        .clickable {
+                            expandedMajor = if (isExpanded) null else major
+                        }
+                )
+
+                Row(
+                    modifier = Modifier.horizontalScroll(horizontalScrollState)
+                ) {
+                    months.forEach { ym ->
+                        val total = expenses
+                            .filter {
+                                !it.isIncome &&
+                                        it.majorCategory == major &&
+                                        YearMonth.from(it.date) == ym
+                            }
+                            .sumOf { it.priceIncludeTax }
+
+                        Text(
+                            text = if (total == 0) "–" else "¥%,d".format(total),
+                            modifier = Modifier
+                                .width(100.dp)
+                                .padding(8.dp)
+                        )
+                    }
+                }
+            }
+
+            // --- 中分類 ---
+            if (isExpanded) {
+
+                val subCategories = remember(major, expenses) {
+                    expenses
+                        .filter { !it.isIncome && it.majorCategory == major }
+                        .map { it.minorCategory }
+                        .distinct()
+                        .sorted()
+                }
+
+                subCategories.forEach { sub ->
+                    Row {
+                        Text(
+                            text = "  ・$sub",
+                            modifier = Modifier
+                                .width(120.dp)
+                                .padding(8.dp)
                         )
 
-                        Row(Modifier.horizontalScroll(rememberScrollState())) {
-                            months.forEach { month ->
-                                val value = expenses
+                        Row(
+                            modifier = Modifier.horizontalScroll(horizontalScrollState)
+                        ) {
+                            months.forEach { ym ->
+                                val total = expenses
                                     .filter {
                                         !it.isIncome &&
                                                 it.majorCategory == major &&
-                                                it.minorCategory == minor &&
-                                                YearMonth.from(it.date) == month
+                                                it.minorCategory == sub &&
+                                                YearMonth.from(it.date) == ym
                                     }
                                     .sumOf { it.priceIncludeTax }
 
                                 Text(
-                                    text = if (value == 0) "–" else "¥%,d".format(value),
-                                    modifier = Modifier.width(90.dp).padding(2.dp),
-                                    fontSize = 12.sp,
-                                    color = MaterialTheme.colorScheme.error
+                                    text = if (total == 0) "–" else "¥%,d".format(total),
+                                    modifier = Modifier
+                                        .width(100.dp)
+                                        .padding(8.dp)
                                 )
                             }
                         }
@@ -984,7 +1319,6 @@ fun MonthlyTableScreen(expenses: List<Expense>) {
         }
     }
 }
-
 
 
 fun buildMonthlySummaries(
@@ -1026,75 +1360,45 @@ fun buildMonthlySummaries(
 fun AnalysisTableSkeleton(
     rows: List<String>,
     columns: List<String>,
+    horizontalScrollState: ScrollState, // ← 追加
     onRowClick: ((String) -> Unit)? = null,
     valueAt: (row: String, column: String) -> Int
 ) {
     val labelWidth = 120.dp
     val cellWidth = 100.dp
-    val horizontalScrollState = rememberScrollState()
 
-    Column(
-        modifier = Modifier.fillMaxWidth()
-    ) {
 
-        // ===== ヘッダー =====
-        Row {
-            Box(
-                modifier = Modifier
-                    .width(labelWidth)
-                    .height(48.dp)
-            )
+    Column {
 
-            Row(
-                modifier = Modifier.horizontalScroll(horizontalScrollState)
-            ) {
-                columns.forEach { column ->
-                    Text(
-                        text = column,
-                        modifier = Modifier
-                            .width(cellWidth)
-                            .padding(8.dp),
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-            }
-        }
 
-        Divider(thickness = 2.dp)
 
-        // ===== 本体 =====
-        LazyColumn(
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            items(rows) { rowLabel ->
+        // ===== 本体（← LazyColumn禁止）=====
+        rows.forEach { rowLabel ->
 
-                Row {
+            Row {
 
-                    // ← 行ラベル（大分類など）
-                    Text(
-                        text = rowLabel,
-                        modifier = Modifier
-                            .width(labelWidth)
-                            .padding(8.dp)
-                            .clickable(enabled = onRowClick != null) {
-                                onRowClick?.invoke(rowLabel)
-                            }
-                    )
-
-                    // ← 月別セル
-                    Row(
-                        modifier = Modifier.horizontalScroll(horizontalScrollState)
-                    ) {
-                        columns.forEach { column ->
-                            val value = valueAt(rowLabel, column)
-
-                            Text(
-                                text = if (value == 0) "–" else "¥%,d".format(value),
-                                modifier = Modifier
-                                    .width(cellWidth)
-                                    .padding(8.dp)
-                            )
+                Text(
+                    text = rowLabel,
+                    modifier = Modifier
+                        .width(labelWidth)
+                        .padding(8.dp)
+                        .clickable(enabled = onRowClick != null) {
+                            onRowClick?.invoke(rowLabel)
                         }
+                )
+
+                Row(
+                    modifier = Modifier.horizontalScroll(horizontalScrollState)
+                ) {
+                    columns.forEach { column ->
+                        val value = valueAt(rowLabel, column)
+
+                        Text(
+                            text = if (value == 0) "–" else "¥%,d".format(value),
+                            modifier = Modifier
+                                .width(cellWidth)
+                                .padding(8.dp)
+                        )
                     }
                 }
             }
@@ -1102,30 +1406,74 @@ fun AnalysisTableSkeleton(
     }
 }
 
+
 @Composable
 fun AnalysisScreen(expenses: List<Expense>) {
 
+    // --- Context ---
+    val context = LocalContext.current
+
+    // ★ 横スクロールはこれ1つだけ
+    val horizontalScrollState = rememberScrollState()
+
+    // ---- 状態 ----
     var selectedMajor by remember { mutableStateOf<String?>(null) }
 
+    // ---- 月次サマリー ----
     val summaries = remember(expenses) {
         buildMonthlySummaries(expenses)
     }
 
+    // ---- 分析結果（大分類 × 月）----
     val analysisResult = remember(expenses) {
         buildAnalysisResult(expenses)
     }
 
-    val columns = summaries.map {
-        "${it.yearMonth.year}/${it.yearMonth.monthValue}"
+    // ---- 列（月）----
+    val columns = remember(summaries) {
+        summaries.map {
+            "${it.yearMonth.year}/${it.yearMonth.monthValue}"
+        }
     }
 
-    Column(modifier = Modifier.fillMaxSize()) {
+    // ===== UI =====
+    LazyColumn(
+        modifier = Modifier.fillMaxSize()
+    ) {
 
-        // ===== 上段：収入・支出・残高 =====
-        Box(modifier = Modifier.weight(1f)) {
+        // ===== CSV書き出しボタン =====
+        item {
+            val context = LocalContext.current
+
+            Button(
+                onClick = {
+                    val csv = exportFullMonthlyAnalysisToCsv(
+                        summaries = summaries,
+                        expenses = expenses
+                    )
+                    val file = saveCsvToCache(context, csv)
+                    shareCsv(context, file)
+                }
+            ) {
+                Text("分析CSV（サマリー＋分類）")
+            }
+
+        }
+
+        // ★ 月ヘッダーを固定
+        stickyHeader {
+            MonthHeader(
+                columns = columns,
+                horizontalScrollState = horizontalScrollState
+            )
+        }
+
+        // ===== 上段：サマリー =====
+        item {
             AnalysisTableSkeleton(
                 rows = listOf("収入", "支出", "残高"),
-                columns = columns
+                columns = columns,
+                horizontalScrollState = horizontalScrollState
             ) { row, column ->
 
                 val summary = summaries.firstOrNull {
@@ -1141,52 +1489,53 @@ fun AnalysisScreen(expenses: List<Expense>) {
             }
         }
 
-        Divider(thickness = 3.dp)
+        item {
+            Divider(
+                thickness = 2.dp,
+                modifier = Modifier.padding(vertical = 8.dp)
+            )
+        }
 
-        // ===== 下段：大分類 or 中分類 =====
-        Box(modifier = Modifier.weight(2f)) {
+        // ===== 下段：分析 =====
+        if (selectedMajor == null) {
 
-            if (selectedMajor == null) {
-                // ---- 大分類一覧 ----
+            item {
                 AnalysisTableSkeleton(
                     rows = analysisResult.keys.sorted(),
                     columns = columns,
-                    onRowClick = { major: String ->
-                        selectedMajor = major
-                    },
-                    valueAt = { row: String, column: String ->
+                    horizontalScrollState = horizontalScrollState,
+                    onRowClick = { selectedMajor = it },
+                    valueAt = { row, column ->
                         analysisResult[row]?.get(column) ?: 0
                     }
                 )
+            }
 
+        } else {
 
+            item {
+                Text(
+                    text = "← 大分類へ戻る",
+                    modifier = Modifier
+                        .padding(8.dp)
+                        .clickable { selectedMajor = null }
+                )
+            }
 
-            } else {
-                // ---- 中分類ドリルダウン ----
-                val subResult = remember(selectedMajor) {
-                    buildSubCategoryAnalysis(expenses, selectedMajor!!)
-                }
+            item {
+                val subResult = buildSubCategoryAnalysis(
+                    expenses = expenses,
+                    majorCategory = selectedMajor!!
+                )
 
-                Column {
-
-                    // ← 戻る
-                    Text(
-                        "← 大分類へ戻る",
-                        modifier = Modifier
-                            .padding(8.dp)
-                            .clickable { selectedMajor = null }
-                    )
-
-                    AnalysisTableSkeleton(
-                        rows = subResult.keys.sorted(),
-                        columns = columns,
-                        onRowClick = null,
-                        valueAt = { row: String, column: String ->
-                            subResult[row]?.get(column) ?: 0
-                        }
-                    )
-
-                }
+                AnalysisTableSkeleton(
+                    rows = subResult.keys.sorted(),
+                    columns = columns,
+                    horizontalScrollState = horizontalScrollState,
+                    valueAt = { row, column ->
+                        subResult[row]?.get(column) ?: 0
+                    }
+                )
             }
         }
     }
@@ -1198,6 +1547,7 @@ fun AnalysisScreen(expenses: List<Expense>) {
 fun AnalysisTableScreen(
     analysisResult: Map<String, Map<String, Int>>
 ) {
+    val horizontalScrollState = rememberScrollState() // ★ 追加
     val rows = analysisResult.keys.toList()
     val columns = analysisResult.values
         .flatMap { it.keys }
@@ -1206,6 +1556,7 @@ fun AnalysisTableScreen(
     AnalysisTableSkeleton(
         rows = rows,
         columns = columns,
+        horizontalScrollState = horizontalScrollState, // ← これ！！
         valueAt = { row, column ->
             analysisResult[row]?.get(column) ?: 0
         }
@@ -1230,6 +1581,47 @@ fun buildAnalysisResult(
                 }
         }
 }
+
+
+@Composable
+fun MonthHeader(
+    columns: List<String>,
+    horizontalScrollState: ScrollState
+) {
+    val labelWidth = 120.dp
+    val cellWidth = 100.dp
+
+    Row(
+        modifier = Modifier
+            .background(MaterialTheme.colorScheme.surface)
+            .fillMaxWidth()
+    ) {
+        Box(
+            modifier = Modifier
+                .width(labelWidth)
+                .height(48.dp)
+        )
+
+        Row(
+            modifier = Modifier.horizontalScroll(horizontalScrollState)
+        ) {
+            columns.forEach { column ->
+                Text(
+                    text = column,
+                    modifier = Modifier
+                        .width(cellWidth)
+                        .padding(8.dp),
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        }
+    }
+
+    Divider(thickness = 2.dp)
+}
+
+
+
 
 @Composable
 fun MajorCategoryAnalysisTable(expenses: List<Expense>) {
@@ -1389,19 +1781,235 @@ fun SummaryCardUI(
 }
 
 
+
+
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AddExpenseDialog(
     onDismiss: () -> Unit,
-    onSave: (Expense) -> Unit
+    onAdd: (Expense) -> Unit
 ) {
+    var date by remember { mutableStateOf(LocalDate.now()) }
+    var name by remember { mutableStateOf("") }
+    var amount by remember { mutableStateOf("") }
+    var major by remember { mutableStateOf("") }
+    var minor by remember { mutableStateOf("") }
+
+    var majorExpanded by remember { mutableStateOf(false) }
+    var minorExpanded by remember { mutableStateOf(false) }
+
+    val minorList = categoryMap[major] ?: emptyList()
+
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("支出を追加") },
-        text = { Text("（ここに入力フォームが入ります）") },
+        title = { Text("手入力で追加") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+
+                // 日付
+                OutlinedTextField(
+                    value = date.toString(),
+                    onValueChange = {
+                        runCatching { LocalDate.parse(it) }
+                            .onSuccess { date = it }
+                    },
+                    label = { Text("日付 (yyyy-MM-dd)") }
+                )
+
+                // 商品名
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    label = { Text("商品名") }
+                )
+
+                // 金額
+                OutlinedTextField(
+                    value = amount,
+                    onValueChange = { amount = it },
+                    label = { Text("金額（税込）") }
+                )
+
+                // ▼ 大分類ドロップダウン
+                ExposedDropdownMenuBox(
+                    expanded = majorExpanded,
+                    onExpandedChange = { majorExpanded = !majorExpanded }
+                ) {
+                    OutlinedTextField(
+                        value = major,
+                        onValueChange = {},
+                        readOnly = true,
+                        label = { Text("大分類") },
+                        trailingIcon = {
+                            ExposedDropdownMenuDefaults.TrailingIcon(majorExpanded)
+                        },
+                        modifier = Modifier.menuAnchor()
+                    )
+
+                    ExposedDropdownMenu(
+                        expanded = majorExpanded,
+                        onDismissRequest = { majorExpanded = false }
+                    ) {
+                        categoryMap.keys.forEach { category ->
+                            DropdownMenuItem(
+                                text = { Text(category) },
+                                onClick = {
+                                    major = category
+                                    minor = ""        // ★ 大分類変更時は中分類リセット
+                                    majorExpanded = false
+                                }
+                            )
+                        }
+                    }
+                }
+
+                // ▼ 中分類ドロップダウン
+                ExposedDropdownMenuBox(
+                    expanded = minorExpanded,
+                    onExpandedChange = {
+                        if (minorList.isNotEmpty()) {
+                            minorExpanded = !minorExpanded
+                        }
+                    }
+                ) {
+                    OutlinedTextField(
+                        value = minor,
+                        onValueChange = {},
+                        readOnly = true,
+                        enabled = minorList.isNotEmpty(),
+                        label = { Text("中分類") },
+                        trailingIcon = {
+                            ExposedDropdownMenuDefaults.TrailingIcon(minorExpanded)
+                        },
+                        modifier = Modifier.menuAnchor()
+                    )
+
+                    ExposedDropdownMenu(
+                        expanded = minorExpanded,
+                        onDismissRequest = { minorExpanded = false }
+                    ) {
+                        minorList.forEach { m ->
+                            DropdownMenuItem(
+                                text = { Text(m) },
+                                onClick = {
+                                    minor = m
+                                    minorExpanded = false
+                                }
+                            )
+                        }
+                    }
+                }
+            }
+        },
         confirmButton = {
+            Button(
+                onClick = {
+                    val price = amount.toIntOrNull() ?: return@Button
+
+                    onAdd(
+                        Expense(
+                            date = date,
+                            store = "手入力",
+                            name = name,
+                            majorCategory = major,
+                            minorCategory = minor,
+                            priceExcludeTax = price,
+                            priceIncludeTax = price
+                        )
+                    )
+                }
+            ) {
+                Text("追加")
+            }
+        },
+        dismissButton = {
             TextButton(onClick = onDismiss) {
-                Text("OK")
+                Text("キャンセル")
             }
         }
     )
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun MajorCategoryDropdown(
+    selected: String,
+    onSelected: (String) -> Unit
+) {
+    var expanded by remember { mutableStateOf(false) }
+
+    ExposedDropdownMenuBox(
+        expanded = expanded,
+        onExpandedChange = { expanded = !expanded }
+    ) {
+        TextField(
+            value = selected,
+            onValueChange = {},
+            readOnly = true,
+            label = { Text("大分類") },
+            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded) },
+            modifier = Modifier.menuAnchor()
+        )
+
+        ExposedDropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false }
+        ) {
+            categoryMap.keys.forEach { category ->
+                DropdownMenuItem(
+                    text = { Text(category) },
+                    onClick = {
+                        onSelected(category)
+                        expanded = false
+                    }
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun MinorCategoryDropdown(
+    majorCategory: String,
+    selected: String,
+    onSelected: (String) -> Unit
+) {
+    val minors = categoryMap[majorCategory] ?: emptyList()
+    var expanded by remember { mutableStateOf(false) }
+
+    ExposedDropdownMenuBox(
+        expanded = expanded,
+        onExpandedChange = { expanded = !expanded }
+    ) {
+        TextField(
+            value = selected,
+            onValueChange = {},
+            readOnly = true,
+            enabled = minors.isNotEmpty(),
+            label = { Text("中分類") },
+            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded) },
+            modifier = Modifier.menuAnchor()
+        )
+
+        ExposedDropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false }
+        ) {
+            minors.forEach { minor ->
+                DropdownMenuItem(
+                    text = { Text(minor) },
+                    onClick = {
+                        onSelected(minor)
+                        expanded = false
+                    }
+                )
+            }
+        }
+    }
+}
+
+fun calculateBalance(list: List<Expense>): Pair<Int, Int> {
+    val inc = list.filter { it.isIncome }.sumOf { it.priceIncludeTax }
+    val exp = list.filter { !it.isIncome }.sumOf { it.priceIncludeTax }
+    return inc to exp
 }
