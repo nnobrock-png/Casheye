@@ -2,10 +2,6 @@
 
 package com.example.casheye
 
-
-
-
-
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -46,11 +42,22 @@ import androidx.compose.foundation.background
 import java.time.format.DateTimeFormatter
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
-
 import androidx.compose.material.icons.filled.Add
-
 import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.rememberScrollState
+import android.content.ClipboardManager
+import android.widget.Toast
+import androidx.compose.material.icons.filled.ContentPaste
+import androidx.compose.foundation.shape.RoundedCornerShape
+import kotlinx.coroutines.launch
+import com.example.casheye.utils.GeminiAnalyzer
+import com.example.casheye.utils.CsvParser
+import androidx.compose.material.icons.filled.PhotoCamera
+import android.Manifest
+import android.content.pm.PackageManager
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
+
 
 
 val categoryMap = mapOf(
@@ -88,12 +95,26 @@ val categoryMap = mapOf(
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
+
+        // --- 権限リクエストを追加 ---
+        val requestPermissionLauncher = registerForActivityResult(
+            ActivityResultContracts.RequestPermission()
+        ) { isGranted: Boolean ->
+            if (!isGranted) {
+                Toast.makeText(this, "カメラ権限が必要です", Toast.LENGTH_SHORT).show()
+            }
+        }
+
+        // アプリ起動時にチェック
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
+            != PackageManager.PERMISSION_GRANTED) {
+            requestPermissionLauncher.launch(Manifest.permission.CAMERA)
+        }
+        // ------------------------
+
         setContent {
             CasheyeTheme {
-                Surface {
-                    CashEyeApp()
-                }
+                CashEyeApp()
             }
         }
     }
@@ -165,35 +186,37 @@ fun CsvImportSection(
     }
 }
 
-
 @Composable
 fun CashEyeApp(modifier: Modifier = Modifier) {
-
+    val scope = rememberCoroutineScope()
     val context = LocalContext.current
 
+    // --- 状態管理 ---
     var expenses by remember { mutableStateOf<List<Expense>>(emptyList()) }
     var recurringTransactions by remember { mutableStateOf<List<RecurringTransaction>>(emptyList()) }
     var selectedTab by remember { mutableIntStateOf(0) }
     var editingExpense by remember { mutableStateOf<Expense?>(null) }
-
-    // ★ 手入力ダイアログ制御
     var showAddDialog by remember { mutableStateOf(false) }
 
+    // ★ カメラ・解析用の状態を追加
+    var showCamera by remember { mutableStateOf(false) }
+    var isAnalyzing by remember { mutableStateOf(false) }
+
+    // 設定・日付管理
     val prefs = context.getSharedPreferences("casheye_prefs", Context.MODE_PRIVATE)
     var startYear by remember { mutableIntStateOf(prefs.getInt("start_year", 2025)) }
     var startMonth by remember { mutableIntStateOf(prefs.getInt("start_month", 1)) }
-
     val today = LocalDate.now()
     var baseDate by remember { mutableStateOf(today) }
-
-    // ★ スワイプ量蓄積
     var dragTotal by remember { mutableFloatStateOf(0f) }
 
+    // --- 初期データ読み込み ---
     LaunchedEffect(Unit) {
         expenses = loadExpenses(context)
         recurringTransactions = loadRecurringTransactions(context)
     }
 
+    // --- データ操作ロジック ---
     val onUpdate: (Expense, Expense) -> Unit = { old, new ->
         expenses = expenses.map { if (it == old) new else it }
         saveExpenses(context, expenses)
@@ -205,117 +228,93 @@ fun CashEyeApp(modifier: Modifier = Modifier) {
         saveExpenses(context, expenses)
     }
 
-    // =============================
-    // ★★★ 全体を Box で包む ★★★
-    // =============================
-    Box(
-        modifier = modifier.fillMaxSize()
-    ) {
+    // クリップボードから解析して追加する関数
+    val importFromClipboard = {
+        val results = processClipboard(context)
+        if (results.isNotEmpty()) {
+            val newExpenses = results + expenses
+            expenses = newExpenses
+            saveExpenses(context, newExpenses)
+            Toast.makeText(context, "${results.size}件読み込みました", Toast.LENGTH_SHORT).show()
+        } else {
+            Toast.makeText(context, "有効なCSVデータが見つかりません", Toast.LENGTH_SHORT).show()
+        }
+    }
 
+    // --- UI構成 ---
+    Box(modifier = modifier.fillMaxSize()) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(8.dp)
                 .pointerInput(selectedTab) {
-                    detectHorizontalDragGestures(
-                        onDragEnd = { dragTotal = 0f }
-                    ) { _, dragAmount ->
+                    detectHorizontalDragGestures(onDragEnd = { dragTotal = 0f }) { _, dragAmount ->
                         dragTotal += dragAmount
                         val threshold = 120f
-
                         if (dragTotal > threshold) {
-                            // 👉 右スワイプ → 未来
-                            baseDate = if (selectedTab == 2)
-                                baseDate.plusYears(1)
-                            else
-                                baseDate.plusMonths(1)
+                            baseDate = if (selectedTab == 2) baseDate.plusYears(1) else baseDate.plusMonths(1)
                             dragTotal = 0f
                         } else if (dragTotal < -threshold) {
-                            // 👈 左スワイプ → 過去
-                            baseDate = if (selectedTab == 2)
-                                baseDate.minusYears(1)
-                            else
-                                baseDate.minusMonths(1)
+                            baseDate = if (selectedTab == 2) baseDate.minusYears(1) else baseDate.minusMonths(1)
                             dragTotal = 0f
                         }
                     }
                 }
         ) {
-
-            /* ======== 上部サマリー ======== */
-
+            /* ======== 1. 上部サマリー ======== */
             val baseMonth = YearMonth.from(baseDate)
             val baseYear = baseDate.year
-
             val filteredExpenses = when (selectedTab) {
                 0, 1 -> expenses.filter { YearMonth.from(it.date) == baseMonth }
                 2 -> expenses.filter { it.date.year == baseYear }
                 else -> expenses
             }
-
             val totalInc = filteredExpenses.filter { it.isIncome }.sumOf { it.priceIncludeTax }
             val totalExp = filteredExpenses.filter { !it.isIncome }.sumOf { it.priceIncludeTax }
 
-            val title = when (selectedTab) {
-                0, 1 -> "${baseMonth.year}年${baseMonth.monthValue}月の累計"
-                2 -> "${baseYear}年の累計"
-                else -> "累計"
-            }
-
             Card(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(bottom = 8.dp),
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.surfaceVariant
-                )
+                modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
             ) {
                 Column(Modifier.padding(16.dp)) {
-
-                    Text(title, fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
-                    Spacer(Modifier.height(4.dp))
-
-                    Row(
-                        Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            "¥%,d".format(totalInc - totalExp),
-                            fontSize = 24.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                        IconButton(
-                            onClick = {
-                                val csv = exportExpensesToCsv(expenses)
-                                val file = saveCsvToCache(context, csv)
-                                shareCsv(context, file)
-                            }
-                        ) {
-                            Icon(Icons.Default.Share, contentDescription = "共有")
-                        }
-
-                    }
-
-                    Spacer(Modifier.height(10.dp))
-
-                    Row(Modifier.fillMaxWidth()) {
-                        Column(Modifier.weight(1f)) {
-                            Text("収入合計", fontSize = 10.sp)
-                            Text("¥%,d".format(totalInc), fontWeight = FontWeight.Bold)
-                        }
-                        Column(Modifier.weight(1f)) {
-                            Text("支出合計", fontSize = 10.sp)
-                            Text("¥%,d".format(totalExp), fontWeight = FontWeight.Bold)
-                        }
+                    Text(if (selectedTab == 2) "${baseYear}年の累計" else "${baseMonth.year}年${baseMonth.monthValue}月の累計",
+                        fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                        Text("¥%,d".format(totalInc - totalExp), fontSize = 24.sp, fontWeight = FontWeight.Bold)
+                        IconButton(onClick = { /* 共有処理 */ }) { Icon(Icons.Default.Share, "共有") }
                     }
                 }
             }
 
-            /* ======== タブ ======== */
+            /* ======== 2. ボタンエリア ======== */
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                // クリップボードボタン
+                Button(
+                    onClick = importFromClipboard,
+                    modifier = Modifier.weight(1f).padding(bottom = 8.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primaryContainer, contentColor = MaterialTheme.colorScheme.onPrimaryContainer),
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Icon(Icons.Default.ContentPaste, contentDescription = null)
+                    Spacer(Modifier.width(4.dp))
+                    Text("貼り付け", fontSize = 12.sp)
+                }
 
+                // ★ カメラ撮影ボタンを追加
+                Button(
+                    onClick = { showCamera = true },
+                    modifier = Modifier.weight(1f).padding(bottom = 8.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondaryContainer, contentColor = MaterialTheme.colorScheme.onSecondaryContainer),
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Icon(Icons.Default.PhotoCamera, contentDescription = null)
+                    Spacer(Modifier.width(4.dp))
+                    Text("レシート撮影", fontSize = 12.sp)
+                }
+            }
+
+            /* ======== 3. タブ ======== */
             val tabs = listOf("日別", "月別", "年別", "明細", "分析", "グラフ", "設定")
-
             ScrollableTabRow(selectedTabIndex = selectedTab) {
                 tabs.forEachIndexed { index, title ->
                     Tab(selected = selectedTab == index, onClick = { selectedTab = index }) {
@@ -324,28 +323,22 @@ fun CashEyeApp(modifier: Modifier = Modifier) {
                 }
             }
 
-            /* ======== 中身 ======== */
-
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f)
-                    .navigationBarsPadding()
-            ) {
+            /* ======== 4. 各画面切り替え ======== */
+            Box(modifier = Modifier.fillMaxWidth().weight(1f).navigationBarsPadding()) {
                 when (selectedTab) {
                     0 -> DailyScreen(
                         expenses = expenses,
-                        onImportCsv = { csvText ->
-                            val imported = parseCsvToExpenses(csvText)
+                        onImportCsv = { csv ->
+                            val imported = CsvParser.parseCsvToExpenses(csv)
                             if (imported.isNotEmpty()) {
-                                expenses = imported + expenses
-                                saveExpenses(context, expenses)
+                                val newExpenses = imported + expenses
+                                expenses = newExpenses
+                                saveExpenses(context, newExpenses)
                             }
                         },
                         onDelete = onDelete,
                         onEdit = { editingExpense = it }
                     )
-
                     1 -> HierarchicalExpenseList(expenses, "month", onDelete) { editingExpense = it }
                     2 -> HierarchicalExpenseList(expenses, "year", onDelete) { editingExpense = it }
                     3 -> FullHistoryDatabaseScreen(expenses, onDelete) { editingExpense = it }
@@ -356,41 +349,70 @@ fun CashEyeApp(modifier: Modifier = Modifier) {
             }
         }
 
-        /* ======== ★ FAB（右下固定） ======== */
+        /* ======== 5. カメラ画面オーバーレイ ======== */
+        if (showCamera) {
+            com.example.casheye.utils.CameraPreviewScreen(
+                onCapture = { capturedBitmap: android.graphics.Bitmap ->
+                    showCamera = false
+                    isAnalyzing = true
 
-        if (selectedTab != 6) { // 設定タブでは非表示なども可能
+                    // 解析開始
+                    startReceiptAnalysis(
+                        bitmap = capturedBitmap,
+                        currentExpenses = expenses,
+                        scope = scope,
+                        context = context,
+                        onResult = { updatedList ->
+                            expenses = updatedList
+                            saveExpenses(context, updatedList)
+                        },
+                        onFinished = { isAnalyzing = false }
+                    )
+                },
+                onDismiss = { showCamera = false }
+            )
+        }
+
+        /* ======== 6. 解析中ローディング ======== */
+        if (isAnalyzing) {
+            Box(
+                modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.5f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    CircularProgressIndicator(color = Color.White)
+                    Spacer(Modifier.height(16.dp))
+                    Text("Geminiが解析中...", color = Color.White, fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+
+        /* ======== FAB ======== */
+        if (selectedTab != 6 && !showCamera) {
             FloatingActionButton(
                 onClick = { showAddDialog = true },
-                modifier = Modifier
-                    .align(Alignment.BottomEnd)
-                    .padding(16.dp)
-                    .navigationBarsPadding()
-            ) {
-                Icon(Icons.Default.Add, contentDescription = "手入力で追加")
-            }
+                modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp).navigationBarsPadding()
+            ) { Icon(Icons.Default.Add, "追加") }
         }
     }
 
-    /* ======== ダイアログ群 ======== */
-
+    // --- ダイアログ群 ---
     editingExpense?.let {
-        EditExpenseDialog(it, { editingExpense = null }) { updated ->
-            onUpdate(it, updated)
-        }
+        EditExpenseDialog(it, { editingExpense = null }) { updated -> onUpdate(it, updated) }
     }
 
     if (showAddDialog) {
         AddExpenseDialog(
             onDismiss = { showAddDialog = false },
-            onAdd = { expense ->
-                expenses = expenses + expense
-                saveExpenses(context, expenses)
+            onAdd = { newExpense ->
+                val newExpenses = expenses + newExpense
+                expenses = newExpenses
+                saveExpenses(context, newExpenses)
                 showAddDialog = false
             }
         )
     }
 }
-
 
 @Composable
 fun DailyScreen(
@@ -2012,4 +2034,75 @@ fun calculateBalance(list: List<Expense>): Pair<Int, Int> {
     val inc = list.filter { it.isIncome }.sumOf { it.priceIncludeTax }
     val exp = list.filter { !it.isIncome }.sumOf { it.priceIncludeTax }
     return inc to exp
+}
+
+
+// クリップボードから文字列を取得し、リストに変換する処理
+
+
+@Composable
+fun ReceiptInputSection(onExpensesParsed: (List<Expense>) -> Unit) {
+    val context = LocalContext.current
+
+    Column(modifier = Modifier.padding(16.dp)) {
+        Button(
+            onClick = {
+                val results = processClipboard(context)
+                if (results.isNotEmpty()) {
+                    onExpensesParsed(results)
+                    Toast.makeText(context, "${results.size}件読み込みました", Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(context, "有効なCSVデータが見つかりません", Toast.LENGTH_SHORT).show()
+                }
+            },
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text("GeminiのCSVを貼り付け")
+        }
+    }
+}
+
+fun processClipboard(context: Context): List<Expense> {
+    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+    val clipData = clipboard.primaryClip
+    return if (clipData != null && clipData.itemCount > 0) {
+        val pastedText = clipData.getItemAt(0).text.toString()
+        // CsvParserを使用してExpenseリストに変換
+        com.example.casheye.utils.CsvParser.parseCsvToExpenses(pastedText)
+    } else {
+        emptyList()
+    }
+}
+
+// 解析処理を完全に独立した関数として定義
+private fun startReceiptAnalysis(
+    bitmap: android.graphics.Bitmap,
+    currentExpenses: List<Expense>,
+    scope: kotlinx.coroutines.CoroutineScope,
+    context: android.content.Context,
+    onResult: (List<Expense>) -> Unit,
+    onFinished: () -> Unit
+) {
+    scope.launch {
+        try {
+            // APIキーの取得
+            val apiKey = com.example.casheye.BuildConfig.GEMINI_API_KEY
+            val analyzer = com.example.casheye.utils.GeminiAnalyzer(apiKey)
+
+            // 型を明示的に指定
+            val results: List<Expense> = analyzer.analyzeReceiptImage(bitmap)
+
+            if (results.isNotEmpty()) {
+                onResult(results + currentExpenses)
+                android.widget.Toast.makeText(context, "${results.size}件解析しました", android.widget.Toast.LENGTH_SHORT).show()
+            } else {
+                android.widget.Toast.makeText(context, "解析結果が空でした", android.widget.Toast.LENGTH_SHORT).show()
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("GeminiError", "Analysis failed", e)
+            android.widget.Toast.makeText(context, "解析エラーが発生しました", android.widget.Toast.LENGTH_SHORT).show()
+        } finally {
+            onFinished()
+        }
+    }
 }
