@@ -77,6 +77,11 @@ dependencies {
 
     // Gemini SDK
     implementation("com.google.ai.client.generativeai:generativeai:0.9.0")
+
+    // OkHttp（Gemini 用）
+    implementation("com.squareup.okhttp3:okhttp:4.11.0")
+    implementation("com.squareup.okio:okio:3.6.0")
+
     implementation("androidx.compose.material:material-icons-extended")
 
     testImplementation(libs.junit)

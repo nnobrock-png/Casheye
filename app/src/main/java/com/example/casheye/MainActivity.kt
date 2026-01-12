@@ -57,6 +57,11 @@ import android.Manifest
 import android.content.pm.PackageManager
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
+import com.example.casheye.ReceiptItem
+import kotlin.plus
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.foundation.ExperimentalFoundationApi
+
 
 
 
@@ -123,11 +128,11 @@ class MainActivity : ComponentActivity() {
 
 
 // --- CSVエクスポート ---
-fun exportExpensesToCSV(context: Context, expenses: List<Expense>) {
+fun exportReceiptItemsToCSV(context: Context, ReceiptItems: List<ReceiptItem>) {
     try {
         val csvHeader = "購入日,購入店舗,商品名,大分類,中分類,税抜価格,税込価格\n"
-        val csvBody = expenses.joinToString("\n") {
-            "${it.date},${it.store},${it.name},${it.majorCategory},${it.minorCategory},${it.priceExcludeTax},${it.priceIncludeTax}"
+        val csvBody = ReceiptItems.joinToString("\n") {
+            "${it.date},${it.store},${it.name},${it.majorCategory},${it.minorCategory},${it.priceNet},${it.priceIncludeTax}"
         }
         val file = File(context.cacheDir, "casheye_data.csv")
         file.writeText(csvHeader + csvBody, Charsets.UTF_8)
@@ -192,13 +197,14 @@ fun CashEyeApp(modifier: Modifier = Modifier) {
     val context = LocalContext.current
 
     // --- 状態管理 ---
-    var expenses by remember { mutableStateOf<List<Expense>>(emptyList()) }
+    var ReceiptItems by remember { mutableStateOf<List<ReceiptItem>>(emptyList()) }
     var recurringTransactions by remember { mutableStateOf<List<RecurringTransaction>>(emptyList()) }
     var selectedTab by remember { mutableIntStateOf(0) }
-    var editingExpense by remember { mutableStateOf<Expense?>(null) }
+    var editingReceiptItem by remember { mutableStateOf<ReceiptItem?>(null) }
     var showAddDialog by remember { mutableStateOf(false) }
+    var showExportMenu by remember { mutableStateOf(false) } // 共有メニュー用
 
-    // ★ カメラ・解析用の状態を追加
+    // カメラ・解析用の状態
     var showCamera by remember { mutableStateOf(false) }
     var isAnalyzing by remember { mutableStateOf(false) }
 
@@ -210,32 +216,68 @@ fun CashEyeApp(modifier: Modifier = Modifier) {
     var baseDate by remember { mutableStateOf(today) }
     var dragTotal by remember { mutableFloatStateOf(0f) }
 
+    // CSV解析ロジック [cite: 2026-01-05]
+    fun processCsvResults(csvText: String) {
+        val lines = csvText.trim().split("\n").map { it.trim() }.filter { it.isNotEmpty() }
+        if (lines.size <= 1) return
+
+        val newItems = lines.drop(1).mapNotNull { line ->
+            val cols = line.split(",")
+            if (cols.size >= 7) {
+                ReceiptItem(
+                    date = cols[0].trim(), // YYYY-MM-DD [cite: 2026-01-05]
+                    store = cols[1].trim(),
+                    name = cols[2].trim(),
+                    majorCategory = cols[3].trim(),
+                    minorCategory = cols[4].trim(),
+                    priceNet = cols[5].replace(Regex("[^0-9]"), "").toIntOrNull() ?: 0,
+                    priceIncludeTax = cols[6].replace(Regex("[^0-9]"), "").toIntOrNull() ?: 0
+                )
+            } else null
+        }
+
+        if (newItems.isNotEmpty()) {
+            ReceiptItems = ReceiptItems + newItems
+            saveReceiptItems(context, ReceiptItems) // 解析後に即保存
+        }
+    }
+
     // --- 初期データ読み込み ---
     LaunchedEffect(Unit) {
-        expenses = loadExpenses(context)
+        ReceiptItems = loadReceiptItems(context)
         recurringTransactions = loadRecurringTransactions(context)
     }
 
     // --- データ操作ロジック ---
-    val onUpdate: (Expense, Expense) -> Unit = { old, new ->
-        expenses = expenses.map { if (it == old) new else it }
-        saveExpenses(context, expenses)
-        editingExpense = null
+    val onUpdate: (ReceiptItem, ReceiptItem) -> Unit = { old, new ->
+        ReceiptItems = ReceiptItems.map { if (it == old) new else it }
+        saveReceiptItems(context, ReceiptItems)
+        editingReceiptItem = null
     }
 
-    val onDelete: (Expense) -> Unit = {
-        expenses = expenses - it
-        saveExpenses(context, expenses)
+    val onDelete: (ReceiptItem) -> Unit = {
+        ReceiptItems = ReceiptItems - it
+        saveReceiptItems(context, ReceiptItems)
     }
 
-    // クリップボードから解析して追加する関数
+    // --- データ操作ロジック ---
     val importFromClipboard = {
-        val results = processClipboard(context)
-        if (results.isNotEmpty()) {
-            val newExpenses = results + expenses
-            expenses = newExpenses
-            saveExpenses(context, newExpenses)
-            Toast.makeText(context, "${results.size}件読み込みました", Toast.LENGTH_SHORT).show()
+        // 関数を呼び出さず、この場で直接クリップボードの中身を取得する
+        val clipboardManager = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+        val clipData = clipboardManager?.primaryClip
+        val clipboardText = if (clipData != null && clipData.itemCount > 0) {
+            clipData.getItemAt(0).text?.toString() ?: ""
+        } else {
+            ""
+        }
+
+        val beforeCount = ReceiptItems.size
+        processCsvResults(clipboardText)
+        val afterCount = ReceiptItems.size
+        val addedCount = afterCount - beforeCount
+
+        if (addedCount > 0) {
+            Toast.makeText(context, "${addedCount}件読み込みました", Toast.LENGTH_SHORT).show()
         } else {
             Toast.makeText(context, "有効なCSVデータが見つかりません", Toast.LENGTH_SHORT).show()
         }
@@ -261,16 +303,18 @@ fun CashEyeApp(modifier: Modifier = Modifier) {
                     }
                 }
         ) {
-            /* ======== 1. 上部サマリー ======== */
+            /* ======= 1. 上部サマリー ======== */
             val baseMonth = YearMonth.from(baseDate)
             val baseYear = baseDate.year
-            val filteredExpenses = when (selectedTab) {
-                0, 1 -> expenses.filter { YearMonth.from(it.date) == baseMonth }
-                2 -> expenses.filter { it.date.year == baseYear }
-                else -> expenses
+
+            val filteredReceiptItems = when (selectedTab) {
+                0, 1 -> ReceiptItems.filter { it.date.startsWith(baseMonth.toString()) } // "YYYY-MM" [cite: 2026-01-05]
+                2 -> ReceiptItems.filter { it.date.startsWith(baseYear.toString()) }
+                else -> ReceiptItems
             }
-            val totalInc = filteredExpenses.filter { it.isIncome }.sumOf { it.priceIncludeTax }
-            val totalExp = filteredExpenses.filter { !it.isIncome }.sumOf { it.priceIncludeTax }
+
+            val totalInc = filteredReceiptItems.filter { it.isIncome }.sumOf { it.priceIncludeTax }
+            val totalExp = filteredReceiptItems.filter { !it.isIncome }.sumOf { it.priceIncludeTax }
 
             Card(
                 modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
@@ -281,18 +325,24 @@ fun CashEyeApp(modifier: Modifier = Modifier) {
                         fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                         Text("¥%,d".format(totalInc - totalExp), fontSize = 24.sp, fontWeight = FontWeight.Bold)
-                        IconButton(onClick = { /* 共有処理 */ }) { Icon(Icons.Default.Share, "共有") }
+
+                        // 共有ボタン：ダイアログを表示するように修正
+                        IconButton(onClick = { showExportMenu = true }) {
+                            Icon(Icons.Default.Share, contentDescription = "共有形式の選択")
+                        }
                     }
                 }
             }
 
             /* ======== 2. ボタンエリア ======== */
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                // クリップボードボタン
                 Button(
                     onClick = importFromClipboard,
                     modifier = Modifier.weight(1f).padding(bottom = 8.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primaryContainer, contentColor = MaterialTheme.colorScheme.onPrimaryContainer),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = Color(0xFF3F51B5), // 以前の濃い青系に固定 [cite: 2026-01-05]
+                        contentColor = Color.White        // ★文字とアイコンを白に固定 [cite: 2026-01-05]
+                    ),
                     shape = RoundedCornerShape(8.dp)
                 ) {
                     Icon(Icons.Default.ContentPaste, contentDescription = null)
@@ -300,11 +350,13 @@ fun CashEyeApp(modifier: Modifier = Modifier) {
                     Text("貼り付け", fontSize = 12.sp)
                 }
 
-                // ★ カメラ撮影ボタンを追加
                 Button(
                     onClick = { showCamera = true },
                     modifier = Modifier.weight(1f).padding(bottom = 8.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondaryContainer, contentColor = MaterialTheme.colorScheme.onSecondaryContainer),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = Color(0xFF5C6BC0), // 少し変えた青系 [cite: 2026-01-05]
+                        contentColor = Color.White         // ★文字とアイコンを白に固定 [cite: 2026-01-05]
+                    ),
                     shape = RoundedCornerShape(8.dp)
                 ) {
                     Icon(Icons.Default.PhotoCamera, contentDescription = null)
@@ -326,45 +378,31 @@ fun CashEyeApp(modifier: Modifier = Modifier) {
             /* ======== 4. 各画面切り替え ======== */
             Box(modifier = Modifier.fillMaxWidth().weight(1f).navigationBarsPadding()) {
                 when (selectedTab) {
-                    0 -> DailyScreen(
-                        expenses = expenses,
-                        onImportCsv = { csv ->
-                            val imported = CsvParser.parseCsvToExpenses(csv)
-                            if (imported.isNotEmpty()) {
-                                val newExpenses = imported + expenses
-                                expenses = newExpenses
-                                saveExpenses(context, newExpenses)
-                            }
-                        },
-                        onDelete = onDelete,
-                        onEdit = { editingExpense = it }
-                    )
-                    1 -> HierarchicalExpenseList(expenses, "month", onDelete) { editingExpense = it }
-                    2 -> HierarchicalExpenseList(expenses, "year", onDelete) { editingExpense = it }
-                    3 -> FullHistoryDatabaseScreen(expenses, onDelete) { editingExpense = it }
-                    4 -> AnalysisScreen(expenses)
-                    5 -> ChartScreen(expenses)
+                    0 -> DailyScreen(ReceiptItems, { processCsvResults(it) }, onDelete, { editingReceiptItem = it })
+                    1 -> HierarchicalReceiptItemList(ReceiptItems, "month", onDelete) { editingReceiptItem = it }
+                    2 -> HierarchicalReceiptItemList(ReceiptItems, "year", onDelete) { editingReceiptItem = it }
+                    3 -> FullHistoryDatabaseScreen(ReceiptItems, onDelete) { editingReceiptItem = it }
+                    4 -> AnalysisScreen(ReceiptItems)
+                    5 -> ChartScreen(ReceiptItems)
                     6 -> SettingsScreen(recurringTransactions, startYear, startMonth, { _, _ -> }, {}, {}, {})
                 }
             }
         }
 
-        /* ======== 5. カメラ画面オーバーレイ ======== */
+        /* ======== 5. カメラ・解析オーバーレイ ======== */
         if (showCamera) {
             com.example.casheye.utils.CameraPreviewScreen(
-                onCapture = { capturedBitmap: android.graphics.Bitmap ->
+                onCapture = { capturedBitmap ->
                     showCamera = false
                     isAnalyzing = true
-
-                    // 解析開始
                     startReceiptAnalysis(
                         bitmap = capturedBitmap,
-                        currentExpenses = expenses,
+                        currentReceiptItems = ReceiptItems,
                         scope = scope,
                         context = context,
                         onResult = { updatedList ->
-                            expenses = updatedList
-                            saveExpenses(context, updatedList)
+                            ReceiptItems = updatedList
+                            saveReceiptItems(context, updatedList)
                         },
                         onFinished = { isAnalyzing = false }
                     )
@@ -373,16 +411,11 @@ fun CashEyeApp(modifier: Modifier = Modifier) {
             )
         }
 
-        /* ======== 6. 解析中ローディング ======== */
         if (isAnalyzing) {
-            Box(
-                modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.5f)),
-                contentAlignment = Alignment.Center
-            ) {
+            Box(modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.5f)), contentAlignment = Alignment.Center) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     CircularProgressIndicator(color = Color.White)
-                    Spacer(Modifier.height(16.dp))
-                    Text("Geminiが解析中...", color = Color.White, fontWeight = FontWeight.Bold)
+                    Text("Geminiが解析中...", color = Color.White, modifier = Modifier.padding(top = 16.dp))
                 }
             }
         }
@@ -397,17 +430,40 @@ fun CashEyeApp(modifier: Modifier = Modifier) {
     }
 
     // --- ダイアログ群 ---
-    editingExpense?.let {
-        EditExpenseDialog(it, { editingExpense = null }) { updated -> onUpdate(it, updated) }
+    if (showExportMenu) {
+        AlertDialog(
+            onDismissRequest = { showExportMenu = false },
+            title = { Text("CSV出力形式の選択") },
+            text = { Text("用途に合わせて形式を選んでください。\n「復元用」は再インストール時の復旧に最適です。") },
+            confirmButton = {
+                TextButton(onClick = {
+                    val csv = exportReceiptItemsToCsv(ReceiptItems)
+                    val file = saveCsvToCache(context, csv)
+                    shareCsv(context, file)
+                    showExportMenu = false
+                }) { Text("分析用 (Excel等)") }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    val csv = exportForImportBackup(ReceiptItems)
+                    val file = saveCsvToCache(context, csv)
+                    shareCsv(context, file)
+                    showExportMenu = false
+                }) { Text("復元用バックアップ") }
+            }
+        )
+    }
+
+    editingReceiptItem?.let { item ->
+        EditReceiptItemDialog(item, { editingReceiptItem = null }) { updated -> onUpdate(item, updated) }
     }
 
     if (showAddDialog) {
-        AddExpenseDialog(
+        AddReceiptItemDialog(
             onDismiss = { showAddDialog = false },
-            onAdd = { newExpense ->
-                val newExpenses = expenses + newExpense
-                expenses = newExpenses
-                saveExpenses(context, newExpenses)
+            onAdd = { newItem ->
+                ReceiptItems = ReceiptItems + newItem
+                saveReceiptItems(context, ReceiptItems)
                 showAddDialog = false
             }
         )
@@ -416,17 +472,17 @@ fun CashEyeApp(modifier: Modifier = Modifier) {
 
 @Composable
 fun DailyScreen(
-    expenses: List<Expense>,
+    ReceiptItems: List<ReceiptItem>,
     onImportCsv: (String) -> Unit,
-    onDelete: (Expense) -> Unit,
-    onEdit: (Expense) -> Unit
+    onDelete: (ReceiptItem) -> Unit,
+    onEdit: (ReceiptItem) -> Unit
 ) {
     Column {
         // ✅ CSV取り込みは日別だけ
         CsvImportSection(onImport = onImportCsv)
 
-        HierarchicalExpenseList(
-            expenses = expenses,
+        HierarchicalReceiptItemList(
+            ReceiptItems = ReceiptItems,
             type = "date",
             onDelete = onDelete,
             onEdit = onEdit
@@ -436,20 +492,26 @@ fun DailyScreen(
 
 
 @Composable
-fun HierarchicalExpenseList(
-    expenses: List<Expense>,
+fun HierarchicalReceiptItemList(
+    ReceiptItems: List<ReceiptItem>,
     type: String,
-    onDelete: (Expense) -> Unit,
-    onEdit: (Expense) -> Unit
+    onDelete: (ReceiptItem) -> Unit,
+    onEdit: (ReceiptItem) -> Unit
 ) {
     var expandedHeaders by remember { mutableStateOf(setOf<String>()) }
     var expandedMajors by remember { mutableStateOf(setOf<String>()) }
     var expandedMinors by remember { mutableStateOf(setOf<String>()) }
 
     val grouped = when (type) {
-        "date" -> expenses.groupBy { it.date.toString() }
-        "month" -> expenses.groupBy { YearMonth.from(it.date).toString() }
-        else -> expenses.groupBy { "${it.date.year}年度" }
+        // 1. 日付ごとのグループ化（そのままの文字列を使用）
+        "date" -> ReceiptItems.groupBy { it.date }
+
+        // 2. 月ごとのグループ化（先頭 7 文字 "YYYY-MM" を抽出） [cite: 2026-01-05]
+        "month" -> ReceiptItems.groupBy { it.date.take(7) }
+
+        // 3. 年度（年）ごとのグループ化（先頭 4 文字 "YYYY" を抽出） [cite: 2026-01-05]
+        else -> ReceiptItems.groupBy { "${it.date.take(4)}年度" }
+
     }.toSortedMap(compareByDescending { it })
 
     LazyColumn(Modifier.fillMaxSize()) {
@@ -535,9 +597,9 @@ fun HierarchicalExpenseList(
                             }
 
                             if (expandedMinors.contains(minorKey)) {
-                                items(minorList) { expense ->
-                                    ExpenseItemRow(
-                                        expense,
+                                items(minorList) { ReceiptItem ->
+                                    ReceiptItemItemRow(
+                                        ReceiptItem,
                                         onDelete,
                                         onEdit,
                                         paddingStart = 56.dp
@@ -554,32 +616,32 @@ fun HierarchicalExpenseList(
 
 
 @Composable
-fun FullHistoryDatabaseScreen(expenses: List<Expense>, onDelete: (Expense) -> Unit, onEdit: (Expense) -> Unit) {
-    val sortedExpenses = expenses.sortedByDescending { it.date }
+fun FullHistoryDatabaseScreen(ReceiptItems: List<ReceiptItem>, onDelete: (ReceiptItem) -> Unit, onEdit: (ReceiptItem) -> Unit) {
+    val sortedReceiptItems = ReceiptItems.sortedByDescending { it.date }
     LazyColumn(Modifier.fillMaxSize()) {
-        items(sortedExpenses) { expense ->
-            ExpenseItemRow(expense, onDelete, onEdit, paddingStart = 16.dp, showDate = true)
+        items(sortedReceiptItems) { ReceiptItem ->
+            ReceiptItemItemRow(ReceiptItem, onDelete, onEdit, paddingStart = 16.dp, showDate = true)
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
         }
     }
 }
 
 @Composable
-fun ExpenseItemRow(expense: Expense, onDelete: (Expense) -> Unit, onEdit: (Expense) -> Unit, paddingStart: androidx.compose.ui.unit.Dp, showDate: Boolean = false) {
+fun ReceiptItemItemRow(ReceiptItem: ReceiptItem, onDelete: (ReceiptItem) -> Unit, onEdit: (ReceiptItem) -> Unit, paddingStart: androidx.compose.ui.unit.Dp, showDate: Boolean = false) {
     var showOptions by remember { mutableStateOf(false) }
     Column(modifier = Modifier.fillMaxWidth().clickable { showOptions = !showOptions }.padding(start = paddingStart, top = 8.dp, bottom = 8.dp, end = 16.dp)) {
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
             Column(modifier = Modifier.weight(1f)) {
-                if (showDate) Text(expense.date.toString(), fontSize = 10.sp, color = MaterialTheme.colorScheme.outline)
-                Text(expense.name, fontSize = 14.sp, fontWeight = FontWeight.Medium)
-                Text("${expense.store} | ${expense.minorCategory}", fontSize = 11.sp, color = MaterialTheme.colorScheme.outline)
+                if (showDate) Text(ReceiptItem.date.toString(), fontSize = 10.sp, color = MaterialTheme.colorScheme.outline)
+                Text(ReceiptItem.name, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                Text("${ReceiptItem.store} | ${ReceiptItem.minorCategory}", fontSize = 11.sp, color = MaterialTheme.colorScheme.outline)
             }
-            Text("¥%,d".format(expense.priceIncludeTax), color = if (expense.isIncome) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error, fontWeight = FontWeight.Bold)
+            Text("¥%,d".format(ReceiptItem.priceIncludeTax), color = if (ReceiptItem.isIncome) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error, fontWeight = FontWeight.Bold)
         }
         if (showOptions) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                TextButton(onClick = { onEdit(expense) }) { Icon(Icons.Default.Edit, null, Modifier.size(18.dp)); Text("修正", fontSize = 12.sp) }
-                TextButton(onClick = { onDelete(expense) }) { Icon(Icons.Default.Delete, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.error); Text("削除", color = MaterialTheme.colorScheme.error, fontSize = 12.sp) }
+                TextButton(onClick = { onEdit(ReceiptItem) }) { Icon(Icons.Default.Edit, null, Modifier.size(18.dp)); Text("修正", fontSize = 12.sp) }
+                TextButton(onClick = { onDelete(ReceiptItem) }) { Icon(Icons.Default.Delete, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.error); Text("削除", color = MaterialTheme.colorScheme.error, fontSize = 12.sp) }
             }
         }
     }
@@ -587,16 +649,16 @@ fun ExpenseItemRow(expense: Expense, onDelete: (Expense) -> Unit, onEdit: (Expen
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun EditExpenseDialog(
-    expense: Expense,
+fun EditReceiptItemDialog(
+    ReceiptItem: ReceiptItem,
     onDismiss: () -> Unit,
-    onSave: (Expense) -> Unit
+    onSave: (ReceiptItem) -> Unit
 ) {
-    var name by remember(expense) { mutableStateOf(expense.name) }
-    var store by remember(expense) { mutableStateOf(expense.store) }
-    var priceStr by remember(expense) { mutableStateOf(expense.priceIncludeTax.toString()) }
-    var major by remember(expense) { mutableStateOf(expense.majorCategory) }
-    var minor by remember(expense) { mutableStateOf(expense.minorCategory) }
+    var name by remember(ReceiptItem) { mutableStateOf(ReceiptItem.name) }
+    var store by remember(ReceiptItem) { mutableStateOf(ReceiptItem.store) }
+    var priceStr by remember(ReceiptItem) { mutableStateOf(ReceiptItem.priceIncludeTax.toString()) }
+    var major by remember(ReceiptItem) { mutableStateOf(ReceiptItem.majorCategory) }
+    var minor by remember(ReceiptItem) { mutableStateOf(ReceiptItem.minorCategory) }
 
     var majorExpanded by remember { mutableStateOf(false) }
     var minorExpanded by remember { mutableStateOf(false) }
@@ -700,10 +762,10 @@ fun EditExpenseDialog(
         },
         confirmButton = {
             Button(onClick = {
-                val newPrice = priceStr.toIntOrNull() ?: expense.priceIncludeTax
+                val newPrice = priceStr.toIntOrNull() ?: ReceiptItem.priceIncludeTax
 
                 onSave(
-                    expense.copy(
+                    ReceiptItem.copy(
                         name = name,
                         store = store,
                         priceIncludeTax = newPrice,
@@ -1034,17 +1096,17 @@ fun SettingsScreen(
 
 
 @Composable
-fun ChartScreen(expenses: List<Expense>) {
+fun ChartScreen(ReceiptItems: List<ReceiptItem>) {
     // 表示対象の年月を保持する状態
     var displayMonth by remember { mutableStateOf(YearMonth.now()) }
 
     // 選択された月の支出だけを抽出
-    val monthlyExpenses = expenses.filter {
-        YearMonth.from(it.date) == displayMonth && !it.isIncome
+    val monthlyReceiptItems = ReceiptItems.filter {
+        // String(YYYY-MM-DD) の先頭7文字を解析して YearMonth に変換し比較する [cite: 2026-01-05]
+        java.time.YearMonth.parse(it.date.take(7)) == displayMonth && !it.isIncome
     }
-
     // 大分類ごとに集計
-    val categoryTotals = monthlyExpenses.groupBy { it.majorCategory }
+    val categoryTotals = monthlyReceiptItems.groupBy { it.majorCategory }
         .mapValues { entry -> entry.value.sumOf { it.priceIncludeTax } }
 
     val totalAmount = categoryTotals.values.sum().toFloat()
@@ -1129,210 +1191,94 @@ fun ChartScreen(expenses: List<Expense>) {
     }
 }
 
-
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun MonthlyTableScreen(
-    expenses: List<Expense>
-) {
-    // --- Context ---
+fun MonthlyTableScreen(ReceiptItems: List<ReceiptItem>) {
     val context = LocalContext.current
-
-    // --- 横スクロール（1本に統一）---
     val horizontalScrollState = rememberScrollState()
-
-    // --- 大分類の展開状態 ---
     var expandedMajor by remember { mutableStateOf<String?>(null) }
 
-    // --- 月次サマリー ---
-    val summaries = remember(expenses) {
-        buildMonthlySummaries(expenses)
+    // データ準備
+    val summaries = remember(ReceiptItems) { buildMonthlySummaries(ReceiptItems) }
+    val months = remember(summaries) { summaries.map { it.monthStr }.distinct().sortedDescending() }
+    val majorCategories = remember(ReceiptItems) {
+        ReceiptItems.map { it.majorCategory.trim() }.filter { it.isNotBlank() }.distinct().sorted()
     }
 
-    val months = remember(summaries) {
-        summaries.map { it.yearMonth }
-    }
-
-    val monthLabels = remember(months) {
-        months.map { "${it.year}/${it.monthValue}" }
-    }
-
-    // --- 大分類一覧（支出のみ）---
-    val majorCategories = remember(expenses) {
-        expenses
-            .filter { !it.isIncome }
-            .map { it.majorCategory }
-            .distinct()
-            .sorted()
-    }
-
-    // ===== 縦スクロールは LazyColumn 1本 =====
-    LazyColumn(
-        modifier = Modifier.fillMaxSize()
-    ) {
-
-        // ===== CSV書き出しボタン =====
+    LazyColumn(modifier = Modifier.fillMaxSize()) {
+        // --- A. CSVボタン ---
         item {
-            Button(
-                modifier = Modifier.padding(8.dp),
-                onClick = {
-                    val csv = exportMonthlyAnalysisToCsv(
-                        months = months,
-                        expenses = expenses
-                    )
-                    val file = saveCsvToCache(context, csv)
-                    shareCsv(context, file)
-                }
-            ) {
-                Text("月次CSVを書き出し")
+            Button(modifier = Modifier.padding(8.dp), onClick = { exportMonthlyAnalysisToCsv(context, ReceiptItems) }) {
+                Text("分析CSV（サマリー＋分類）")
             }
         }
 
-        // ===== ヘッダー（月）=====
-        item {
-            Row {
-                Box(
-                    modifier = Modifier
-                        .width(120.dp)
-                        .height(48.dp)
-                )
-
-                Row(
-                    modifier = Modifier.horizontalScroll(horizontalScrollState)
-                ) {
-                    monthLabels.forEach { label ->
-                        Text(
-                            text = label,
-                            modifier = Modifier
-                                .width(100.dp)
-                                .padding(8.dp),
-                            fontWeight = FontWeight.Bold
-                        )
+        // --- B. 月ヘッダー (ここが黒い帯の部分) ---
+        stickyHeader {
+            Row(modifier = Modifier.fillMaxWidth().background(Color.Black.copy(alpha = 0.8f)).padding(vertical = 8.dp)) {
+                Spacer(modifier = Modifier.width(120.dp)) // 左端の固定幅
+                Row(modifier = Modifier.horizontalScroll(horizontalScrollState)) {
+                    months.forEach { label ->
+                        Text(text = label, modifier = Modifier.width(100.dp), color = Color.White, textAlign = TextAlign.Center, fontWeight = FontWeight.Bold)
                     }
                 }
             }
         }
 
-        item { Divider(thickness = 2.dp) }
-
-        // ===== 収入・支出・残高 =====
-        listOf("収入", "支出", "残高").forEach { rowLabel ->
+        // --- C. サマリー段 (収入・支出・残高) ---
+        listOf("収入", "支出", "残高").forEach { label ->
             item {
-                Row {
-
-                    Text(
-                        text = rowLabel,
-                        modifier = Modifier
-                            .width(120.dp)
-                            .padding(8.dp)
-                    )
-
-                    Row(
-                        modifier = Modifier.horizontalScroll(horizontalScrollState)
-                    ) {
-                        months.forEach { ym ->
-                            val summary = summaries.firstOrNull {
-                                it.yearMonth == ym
-                            }
-
-                            val value = when (rowLabel) {
-                                "収入" -> summary?.incomeTotal ?: 0
-                                "支出" -> summary?.expenseTotal ?: 0
-                                "残高" -> summary?.balance ?: 0
+                Row(modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp)) {
+                    Text(text = label, modifier = Modifier.width(120.dp).padding(start = 12.dp), fontWeight = FontWeight.Bold)
+                    Row(modifier = Modifier.horizontalScroll(horizontalScrollState)) {
+                        months.forEach { mStr ->
+                            val s = summaries.firstOrNull { it.monthStr == mStr }
+                            val amt = when(label) {
+                                "収入" -> s?.incomeTotal ?: 0
+                                "支出" -> s?.ReceiptItemTotal ?: 0
+                                "残高" -> s?.balance ?: 0
                                 else -> 0
                             }
-
-                            Text(
-                                text = if (value == 0) "–" else "¥%,d".format(value),
-                                modifier = Modifier
-                                    .width(100.dp)
-                                    .padding(8.dp)
-                            )
+                            Text(text = if(amt == 0) "–" else "¥%,d".format(amt), modifier = Modifier.width(100.dp).padding(end = 8.dp), textAlign = TextAlign.End)
                         }
                     }
                 }
+                HorizontalDivider(thickness = 0.5.dp)
             }
         }
 
-        item { Divider(thickness = 2.dp) }
-
-        // ===== 大分類・中分類 =====
-        items(majorCategories) { major ->
-
-            val isExpanded = expandedMajor == major
-
-            // --- 大分類行 ---
-            Row {
-                Text(
-                    text = if (isExpanded) "▼ $major" else "▶ $major",
-                    modifier = Modifier
-                        .width(120.dp)
-                        .padding(8.dp)
-                        .clickable {
-                            expandedMajor = if (isExpanded) null else major
-                        }
-                )
-
+        // --- D. 分類別段 ---
+        majorCategories.forEach { major ->
+            // --- 大分類 ---
+            item {
+                val isExpanded = expandedMajor == major
                 Row(
-                    modifier = Modifier.horizontalScroll(horizontalScrollState)
+                    modifier = Modifier.fillMaxWidth().clickable { expandedMajor = if (isExpanded) null else major }.padding(vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    months.forEach { ym ->
-                        val total = expenses
-                            .filter {
-                                !it.isIncome &&
-                                        it.majorCategory == major &&
-                                        YearMonth.from(it.date) == ym
-                            }
-                            .sumOf { it.priceIncludeTax }
-
-                        Text(
-                            text = if (total == 0) "–" else "¥%,d".format(total),
-                            modifier = Modifier
-                                .width(100.dp)
-                                .padding(8.dp)
-                        )
+                    Text(text = if (isExpanded) "▼ $major" else "▶ $major", modifier = Modifier.width(120.dp).padding(start = 12.dp), fontWeight = FontWeight.Medium)
+                    Row(modifier = Modifier.horizontalScroll(horizontalScrollState)) {
+                        months.forEach { mStr ->
+                            val total = ReceiptItems.filter { it.majorCategory.trim() == major && it.date.startsWith(mStr) }.sumOf { it.priceIncludeTax }
+                            Text(text = if (total == 0) "–" else "¥%,d".format(total), modifier = Modifier.width(100.dp).padding(end = 8.dp), textAlign = TextAlign.End)
+                        }
                     }
                 }
+                HorizontalDivider(thickness = 0.5.dp, color = Color.LightGray.copy(alpha = 0.5f))
             }
 
-            // --- 中分類 ---
-            if (isExpanded) {
-
-                val subCategories = remember(major, expenses) {
-                    expenses
-                        .filter { !it.isIncome && it.majorCategory == major }
-                        .map { it.minorCategory }
-                        .distinct()
-                        .sorted()
-                }
-
+            // --- 中分類 (展開時) ---
+            if (expandedMajor == major) {
+                val subCategories = ReceiptItems.filter { it.majorCategory.trim() == major }.map { it.minorCategory.trim() }.filter { it.isNotBlank() }.distinct().sorted()
                 subCategories.forEach { sub ->
-                    Row {
-                        Text(
-                            text = "  ・$sub",
-                            modifier = Modifier
-                                .width(120.dp)
-                                .padding(8.dp)
-                        )
-
-                        Row(
-                            modifier = Modifier.horizontalScroll(horizontalScrollState)
-                        ) {
-                            months.forEach { ym ->
-                                val total = expenses
-                                    .filter {
-                                        !it.isIncome &&
-                                                it.majorCategory == major &&
-                                                it.minorCategory == sub &&
-                                                YearMonth.from(it.date) == ym
-                                    }
-                                    .sumOf { it.priceIncludeTax }
-
-                                Text(
-                                    text = if (total == 0) "–" else "¥%,d".format(total),
-                                    modifier = Modifier
-                                        .width(100.dp)
-                                        .padding(8.dp)
-                                )
+                    item {
+                        Row(modifier = Modifier.fillMaxWidth().background(Color.Gray.copy(alpha = 0.05f)).padding(vertical = 8.dp)) {
+                            Text(text = "  ・$sub", modifier = Modifier.width(120.dp).padding(start = 24.dp), fontSize = 13.sp, color = Color.Gray)
+                            Row(modifier = Modifier.horizontalScroll(horizontalScrollState)) {
+                                months.forEach { mStr ->
+                                    val total = ReceiptItems.filter { it.majorCategory.trim() == major && it.minorCategory.trim() == sub && it.date.startsWith(mStr) }.sumOf { it.priceIncludeTax }
+                                    Text(text = if (total == 0) "–" else "¥%,d".format(total), modifier = Modifier.width(100.dp).padding(end = 8.dp), textAlign = TextAlign.End, fontSize = 13.sp, color = Color.Gray)
+                                }
                             }
                         }
                     }
@@ -1341,21 +1287,20 @@ fun MonthlyTableScreen(
         }
     }
 }
-
-
 fun buildMonthlySummaries(
-    expenses: List<Expense>
+    ReceiptItems: List<ReceiptItem>
 ): List<MonthlySummary> {
 
-    return expenses
-        .groupBy { YearMonth.from(it.date) }
-        .map { (ym, list) ->
+    return ReceiptItems
+        .filter { it.date.length >= 7 } // YYYY-MM までの長さがあるかチェック
+        .groupBy { it.date.take(7) }   // 先頭7文字 "YYYY-MM" でグループ化 [cite: 2026-01-05]
+        .map { (month, list) ->
 
             val income = list
                 .filter { it.isIncome }
                 .sumOf { it.priceIncludeTax }
 
-            val expense = list
+            val totalExpense = list
                 .filter { !it.isIncome }
                 .sumOf { it.priceIncludeTax }
 
@@ -1367,306 +1312,75 @@ fun buildMonthlySummaries(
                 }
 
             MonthlySummary(
-                yearMonth = ym,
+                monthStr = month,             // String型として保持
                 incomeTotal = income,
-                expenseTotal = expense,
-                balance = income - expense,
+                ReceiptItemTotal = totalExpense,
+                balance = income - totalExpense,
                 majorCategoryTotals = majorTotals
             )
         }
-        .sortedBy { it.yearMonth }
+        .sortedByDescending { it.monthStr } // 新しい月を一番左（最初）に表示 [cite: 2026-01-05]
 }
 
 
 @Composable
-fun AnalysisTableSkeleton(
-    rows: List<String>,
-    columns: List<String>,
-    horizontalScrollState: ScrollState, // ← 追加
-    onRowClick: ((String) -> Unit)? = null,
-    valueAt: (row: String, column: String) -> Int
-) {
-    val labelWidth = 120.dp
-    val cellWidth = 100.dp
-
-
-    Column {
-
-
-
-        // ===== 本体（← LazyColumn禁止）=====
-        rows.forEach { rowLabel ->
-
-            Row {
-
-                Text(
-                    text = rowLabel,
-                    modifier = Modifier
-                        .width(labelWidth)
-                        .padding(8.dp)
-                        .clickable(enabled = onRowClick != null) {
-                            onRowClick?.invoke(rowLabel)
-                        }
-                )
-
-                Row(
-                    modifier = Modifier.horizontalScroll(horizontalScrollState)
-                ) {
-                    columns.forEach { column ->
-                        val value = valueAt(rowLabel, column)
-
-                        Text(
-                            text = if (value == 0) "–" else "¥%,d".format(value),
-                            modifier = Modifier
-                                .width(cellWidth)
-                                .padding(8.dp)
-                        )
-                    }
-                }
-            }
-        }
-    }
+fun AnalysisScreen(ReceiptItems: List<ReceiptItem>) {
+    // 整理：これ一行だけにします。
+    // 描画ロジックはすべて MonthlyTableScreen の中にあるため、これで十分です。
+    MonthlyTableScreen(ReceiptItems = ReceiptItems)
 }
 
 
-@Composable
-fun AnalysisScreen(expenses: List<Expense>) {
 
-    // --- Context ---
-    val context = LocalContext.current
-
-    // ★ 横スクロールはこれ1つだけ
-    val horizontalScrollState = rememberScrollState()
-
-    // ---- 状態 ----
-    var selectedMajor by remember { mutableStateOf<String?>(null) }
-
-    // ---- 月次サマリー ----
-    val summaries = remember(expenses) {
-        buildMonthlySummaries(expenses)
-    }
-
-    // ---- 分析結果（大分類 × 月）----
-    val analysisResult = remember(expenses) {
-        buildAnalysisResult(expenses)
-    }
-
-    // ---- 列（月）----
-    val columns = remember(summaries) {
-        summaries.map {
-            "${it.yearMonth.year}/${it.yearMonth.monthValue}"
+// 大分類別の月次集計 [cite: 2026-01-05]
+fun buildAnalysisResult(items: List<ReceiptItem>): Map<String, Map<String, Int>> {
+    return items
+        .groupBy { it.majorCategory.trim() } // 空白を除去
+        .mapValues { (_, majorList) ->
+            majorList
+                .filter { it.date.length >= 7 }
+                .groupBy { it.date.take(7) } // "YYYY-MM" [cite: 2026-01-05]
+                .mapValues { it.value.sumOf { item -> item.priceIncludeTax } }
         }
-    }
+}
 
-    // ===== UI =====
-    LazyColumn(
-        modifier = Modifier.fillMaxSize()
-    ) {
-
-        // ===== CSV書き出しボタン =====
-        item {
-            val context = LocalContext.current
-
-            Button(
-                onClick = {
-                    val csv = exportFullMonthlyAnalysisToCsv(
-                        summaries = summaries,
-                        expenses = expenses
-                    )
-                    val file = saveCsvToCache(context, csv)
-                    shareCsv(context, file)
-                }
-            ) {
-                Text("分析CSV（サマリー＋分類）")
-            }
-
+// 中分類別の月次集計 [cite: 2026-01-05]
+fun buildSubCategoryAnalysis(items: List<ReceiptItem>, major: String): Map<String, Map<String, Int>> {
+    return items
+        .filter { it.majorCategory.trim() == major.trim() }
+        .groupBy { it.minorCategory.trim() }
+        .mapValues { (_, minorList) ->
+            minorList
+                .filter { it.date.length >= 7 }
+                .groupBy { it.date.take(7) } // "YYYY-MM" [cite: 2026-01-05]
+                .mapValues { it.value.sumOf { item -> item.priceIncludeTax } }
         }
-
-        // ★ 月ヘッダーを固定
-        stickyHeader {
-            MonthHeader(
-                columns = columns,
-                horizontalScrollState = horizontalScrollState
-            )
-        }
-
-        // ===== 上段：サマリー =====
-        item {
-            AnalysisTableSkeleton(
-                rows = listOf("収入", "支出", "残高"),
-                columns = columns,
-                horizontalScrollState = horizontalScrollState
-            ) { row, column ->
-
-                val summary = summaries.firstOrNull {
-                    "${it.yearMonth.year}/${it.yearMonth.monthValue}" == column
-                } ?: return@AnalysisTableSkeleton 0
-
-                when (row) {
-                    "収入" -> summary.incomeTotal
-                    "支出" -> summary.expenseTotal
-                    "残高" -> summary.balance
-                    else -> 0
-                }
-            }
-        }
-
-        item {
-            Divider(
-                thickness = 2.dp,
-                modifier = Modifier.padding(vertical = 8.dp)
-            )
-        }
-
-        // ===== 下段：分析 =====
-        if (selectedMajor == null) {
-
-            item {
-                AnalysisTableSkeleton(
-                    rows = analysisResult.keys.sorted(),
-                    columns = columns,
-                    horizontalScrollState = horizontalScrollState,
-                    onRowClick = { selectedMajor = it },
-                    valueAt = { row, column ->
-                        analysisResult[row]?.get(column) ?: 0
-                    }
-                )
-            }
-
-        } else {
-
-            item {
-                Text(
-                    text = "← 大分類へ戻る",
-                    modifier = Modifier
-                        .padding(8.dp)
-                        .clickable { selectedMajor = null }
-                )
-            }
-
-            item {
-                val subResult = buildSubCategoryAnalysis(
-                    expenses = expenses,
-                    majorCategory = selectedMajor!!
-                )
-
-                AnalysisTableSkeleton(
-                    rows = subResult.keys.sorted(),
-                    columns = columns,
-                    horizontalScrollState = horizontalScrollState,
-                    valueAt = { row, column ->
-                        subResult[row]?.get(column) ?: 0
-                    }
-                )
-            }
-        }
-    }
 }
 
 
 
 @Composable
-fun AnalysisTableScreen(
-    analysisResult: Map<String, Map<String, Int>>
-) {
-    val horizontalScrollState = rememberScrollState() // ★ 追加
-    val rows = analysisResult.keys.toList()
-    val columns = analysisResult.values
-        .flatMap { it.keys }
-        .distinct()
-
-    AnalysisTableSkeleton(
-        rows = rows,
-        columns = columns,
-        horizontalScrollState = horizontalScrollState, // ← これ！！
-        valueAt = { row, column ->
-            analysisResult[row]?.get(column) ?: 0
-        }
-    )
-}
-
-
-fun buildAnalysisResult(
-    expenses: List<Expense>
-): Map<String, Map<String, Int>> {
-
-    return expenses
-        .filter { !it.isIncome }
-        .groupBy { it.majorCategory }
-        .mapValues { (_, list) ->
-            list.groupBy { YearMonth.from(it.date) }
-                .mapValues { entry ->
-                    entry.value.sumOf { it.priceIncludeTax }
-                }
-                .mapKeys { (ym, _) ->
-                    "${ym.year}/${ym.monthValue}"
-                }
-        }
-}
-
-
-@Composable
-fun MonthHeader(
-    columns: List<String>,
-    horizontalScrollState: ScrollState
-) {
-    val labelWidth = 120.dp
-    val cellWidth = 100.dp
-
-    Row(
-        modifier = Modifier
-            .background(MaterialTheme.colorScheme.surface)
-            .fillMaxWidth()
-    ) {
-        Box(
-            modifier = Modifier
-                .width(labelWidth)
-                .height(48.dp)
-        )
-
-        Row(
-            modifier = Modifier.horizontalScroll(horizontalScrollState)
-        ) {
-            columns.forEach { column ->
-                Text(
-                    text = column,
-                    modifier = Modifier
-                        .width(cellWidth)
-                        .padding(8.dp),
-                    fontWeight = FontWeight.Bold
-                )
-            }
-        }
-    }
-
-    Divider(thickness = 2.dp)
-}
-
-
-
-
-@Composable
-fun MajorCategoryAnalysisTable(expenses: List<Expense>) {
-    // expenses → 月別 × 大分類 集計
+fun MajorCategoryAnalysisTable(ReceiptItems: List<ReceiptItem>) {
+    // ReceiptItems → 月別 × 大分類 集計
     // AnalysisTableSkeleton に流す
 }
 
 fun buildMajorCategoryMonthlyTable(
-    expenses: List<Expense>
+    ReceiptItems: List<ReceiptItem>
 ): Pair<List<String>, Map<String, Map<String, Int>>> {
 
-    val monthKeys = expenses
-        .map { YearMonth.from(it.date) }
+    val monthKeys = ReceiptItems
+        .map { java.time.YearMonth.from(java.time.LocalDate.parse(it.date)) }
         .distinct()
         .sorted()
         .map { "${it.year}/${it.monthValue}" }
 
-    val table = expenses
+    val table = ReceiptItems
         .filter { !it.isIncome }
         .groupBy { it.majorCategory }
         .mapValues { (_, list) ->
             list
-                .groupBy { YearMonth.from(it.date) }
+                .groupBy { java.time.YearMonth.from(java.time.LocalDate.parse(it.date)) }
                 .mapValues { (_, monthList) ->
                     monthList.sumOf { it.priceIncludeTax }
                 }
@@ -1678,26 +1392,9 @@ fun buildMajorCategoryMonthlyTable(
     return monthKeys to table
 }
 
-fun buildSubCategoryAnalysis(
-    expenses: List<Expense>,
-    majorCategory: String
-): Map<String, Map<String, Int>> {
 
-    return expenses
-        .filter { !it.isIncome && it.majorCategory == majorCategory }
-        .groupBy { it.minorCategory }
-        .mapValues { (_, list) ->
-            list.groupBy { YearMonth.from(it.date) }
-                .mapValues { (_, items) ->
-                    items.sumOf { it.priceIncludeTax }
-                }
-                .mapKeys { (ym, _) ->
-                    "${ym.year}/${ym.monthValue}"
-                }
-        }
-}
 
-fun parseCsvToExpenses(csv: String): List<Expense> {
+fun parseCsvToReceiptItems(csv: String): List<ReceiptItem> {
 
     val formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd")
 
@@ -1715,14 +1412,14 @@ fun parseCsvToExpenses(csv: String): List<Expense> {
             if (cols.size < 7) return@mapNotNull null
 
             try {
-                Expense(
-                    date = LocalDate.parse(cols[0].trim(), formatter),
-                    store = cols[1].trim(),
-                    name = cols[2].trim(),
-                    majorCategory = cols[3].trim(),
-                    minorCategory = cols[4].trim(),
-                    priceExcludeTax = cols[5].trim().toInt(),
-                    priceIncludeTax = cols[6].trim().toInt()
+                ReceiptItem(
+                    date = cols[0].trim(),                     // 購入日
+                    store = cols[1].trim(),                    // 購入店舗
+                    name = cols[2].trim(),                     // 商品名
+                    majorCategory = cols[3].trim(),            // 分類大分類
+                    minorCategory = cols[4].trim(),            // 分類中分類
+                    priceNet = cols[5].trim().toDoubleOrNull()?.toInt() ?: 0,      // 税抜価格
+                    priceIncludeTax = cols[6].trim().toDoubleOrNull()?.toInt() ?: 0 // 税込価格
                 )
             } catch (e: Exception) {
                 null
@@ -1731,31 +1428,31 @@ fun parseCsvToExpenses(csv: String): List<Expense> {
 }
 @Composable
 fun SummaryCard(
-    expenses: List<Expense>,
+    ReceiptItems: List<ReceiptItem>,
     selectedTab: Int,
     baseMonth: YearMonth,
     baseYear: Int
 ) {
 
-    val filteredExpenses = when (selectedTab) {
+    val filteredReceiptItems = when (selectedTab) {
         // 日別・月別 → 表示中の月
-        0, 1 -> expenses.filter {
-            YearMonth.from(it.date) == baseMonth
+        0, 1 -> ReceiptItems.filter {
+            java.time.YearMonth.from(java.time.LocalDate.parse(it.date)) == baseMonth
         }
 
         // 年別 → 表示中の年（1月〜12月）
-        2 -> expenses.filter {
-            it.date.year == baseYear
+        2 -> ReceiptItems.filter {
+            java.time.LocalDate.parse(it.date).year == baseYear
         }
 
-        else -> expenses
+        else -> ReceiptItems
     }
 
-    val income = filteredExpenses
+    val income = filteredReceiptItems
         .filter { it.isIncome }
         .sumOf { it.priceIncludeTax }
 
-    val expense = filteredExpenses
+    val ReceiptItem = filteredReceiptItems
         .filter { !it.isIncome }
         .sumOf { it.priceIncludeTax }
 
@@ -1767,7 +1464,7 @@ fun SummaryCard(
 
     SummaryCardUI(
         title = title,
-        amount = income - expense
+        amount = income - ReceiptItem
     )
 }
 
@@ -1807,9 +1504,9 @@ fun SummaryCardUI(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun AddExpenseDialog(
+fun AddReceiptItemDialog(
     onDismiss: () -> Unit,
-    onAdd: (Expense) -> Unit
+    onAdd: (ReceiptItem) -> Unit
 ) {
     var date by remember { mutableStateOf(LocalDate.now()) }
     var name by remember { mutableStateOf("") }
@@ -1929,13 +1626,13 @@ fun AddExpenseDialog(
                     val price = amount.toIntOrNull() ?: return@Button
 
                     onAdd(
-                        Expense(
-                            date = date,
+                        ReceiptItem(
+                            date = date.toString(),
                             store = "手入力",
                             name = name,
                             majorCategory = major,
                             minorCategory = minor,
-                            priceExcludeTax = price,
+                            priceNet = price,
                             priceIncludeTax = price
                         )
                     )
@@ -2030,7 +1727,7 @@ fun MinorCategoryDropdown(
     }
 }
 
-fun calculateBalance(list: List<Expense>): Pair<Int, Int> {
+fun calculateBalance(list: List<ReceiptItem>): Pair<Int, Int> {
     val inc = list.filter { it.isIncome }.sumOf { it.priceIncludeTax }
     val exp = list.filter { !it.isIncome }.sumOf { it.priceIncludeTax }
     return inc to exp
@@ -2041,7 +1738,7 @@ fun calculateBalance(list: List<Expense>): Pair<Int, Int> {
 
 
 @Composable
-fun ReceiptInputSection(onExpensesParsed: (List<Expense>) -> Unit) {
+fun ReceiptInputSection(onReceiptItemsParsed: (List<ReceiptItem>) -> Unit) {
     val context = LocalContext.current
 
     Column(modifier = Modifier.padding(16.dp)) {
@@ -2049,7 +1746,7 @@ fun ReceiptInputSection(onExpensesParsed: (List<Expense>) -> Unit) {
             onClick = {
                 val results = processClipboard(context)
                 if (results.isNotEmpty()) {
-                    onExpensesParsed(results)
+                    onReceiptItemsParsed(results)
                     Toast.makeText(context, "${results.size}件読み込みました", Toast.LENGTH_SHORT).show()
                 } else {
                     Toast.makeText(context, "有効なCSVデータが見つかりません", Toast.LENGTH_SHORT).show()
@@ -2062,47 +1759,131 @@ fun ReceiptInputSection(onExpensesParsed: (List<Expense>) -> Unit) {
     }
 }
 
-fun processClipboard(context: Context): List<Expense> {
+fun processClipboard(context: Context): List<ReceiptItem> {
     val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
     val clipData = clipboard.primaryClip
+
+    // if文全体の結果を返却するようにします
     return if (clipData != null && clipData.itemCount > 0) {
         val pastedText = clipData.getItemAt(0).text.toString()
-        // CsvParserを使用してExpenseリストに変換
-        com.example.casheye.utils.CsvParser.parseCsvToExpenses(pastedText)
+        // [cite: 2026-01-05] 仕様に基づき、CSVを解析したリストを直接返します
+        com.example.casheye.utils.CsvParser.parse(pastedText)
     } else {
         emptyList()
     }
 }
 
-// 解析処理を完全に独立した関数として定義
-private fun startReceiptAnalysis(
-    bitmap: android.graphics.Bitmap,
-    currentExpenses: List<Expense>,
-    scope: kotlinx.coroutines.CoroutineScope,
-    context: android.content.Context,
-    onResult: (List<Expense>) -> Unit,
-    onFinished: () -> Unit
-) {
-    scope.launch {
-        try {
-            // APIキーの取得
-            val apiKey = com.example.casheye.BuildConfig.GEMINI_API_KEY
-            val analyzer = com.example.casheye.utils.GeminiAnalyzer(apiKey)
+// --- クラスの内部に配置してください ---
 
-            // 型を明示的に指定
-            val results: List<Expense> = analyzer.analyzeReceiptImage(bitmap)
+    private fun startReceiptAnalysis(
+        bitmap: android.graphics.Bitmap,
+        currentReceiptItems: List<ReceiptItem>,
+        scope: kotlinx.coroutines.CoroutineScope,
+        context: android.content.Context,
+        onResult: (List<ReceiptItem>) -> Unit,
+        onFinished: () -> Unit
+    ) {
+        scope.launch {
+            try {
+                val apiKey = com.example.casheye.BuildConfig.GEMINI_API_KEY
+                val analyzer = com.example.casheye.utils.GeminiAnalyzer(apiKey)
+                val results: List<ReceiptItem> = analyzer.analyzeReceiptImage(bitmap)
 
-            if (results.isNotEmpty()) {
-                onResult(results + currentExpenses)
-                android.widget.Toast.makeText(context, "${results.size}件解析しました", android.widget.Toast.LENGTH_SHORT).show()
-            } else {
-                android.widget.Toast.makeText(context, "解析結果が空でした", android.widget.Toast.LENGTH_SHORT).show()
+                if (results.isNotEmpty()) {
+                    onResult(results + currentReceiptItems)
+                    android.widget.Toast.makeText(context, "${results.size}件解析しました", android.widget.Toast.LENGTH_SHORT).show()
+                } else {
+                    android.widget.Toast.makeText(context, "解析結果が空でした", android.widget.Toast.LENGTH_SHORT).show()
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("GeminiError", "Analysis failed", e)
+                android.widget.Toast.makeText(context, "解析エラーが発生しました", android.widget.Toast.LENGTH_SHORT).show()
+            } finally {
+                onFinished()
             }
-        } catch (e: Exception) {
-            android.util.Log.e("GeminiError", "Analysis failed", e)
-            android.widget.Toast.makeText(context, "解析エラーが発生しました", android.widget.Toast.LENGTH_SHORT).show()
-        } finally {
-            onFinished()
         }
     }
-}
+
+
+
+
+// --- MainActivityクラスの最後の } の直前に配置 ---
+
+private fun exportMonthlyAnalysisToCsv(context: android.content.Context, items: List<ReceiptItem>) {
+    // 1. データ準備（画面の表と同じロジックを使用） [cite: 2026-01-05]
+    val summaries = buildMonthlySummaries(items)
+    val months = summaries.map { it.monthStr }.distinct().sortedDescending()
+    val majorCategories = items.map { it.majorCategory.trim() }.filter { it.isNotBlank() }.distinct().sorted()
+
+    val csvContent = StringBuilder().apply {
+        // --- A. サマリーセクション ---
+        append("サマリー,${months.joinToString(",")}\n")
+        listOf("収入", "支出", "残高").forEach { label ->
+            append(label)
+            months.forEach { mStr ->
+                val s = summaries.firstOrNull { it.monthStr == mStr }
+                val amt = when(label) {
+                    "収入" -> s?.incomeTotal ?: 0
+                    "支出" -> s?.ReceiptItemTotal ?: 0
+                    "残高" -> s?.balance ?: 0
+                    else -> 0
+                }
+                append(",$amt")
+            }
+            append("\n")
+        }
+        append("\n") // 空行
+
+        // --- B. 大分類セクション ---
+        append("大分類,${months.joinToString(",")}\n")
+        majorCategories.forEach { major ->
+            append(major)
+            months.forEach { mStr ->
+                val total = items.filter { it.majorCategory.trim() == major && it.date.startsWith(mStr) }
+                    .sumOf { it.priceIncludeTax }
+                append(",$total")
+            }
+            append("\n")
+        }
+        append("\n") // 空行
+
+        // --- C. 中分類セクション ---
+        append("中分類,${months.joinToString(",")}\n")
+        majorCategories.forEach { major ->
+            val subCategories = items.filter { it.majorCategory.trim() == major }
+                .map { it.minorCategory.trim() }.filter { it.isNotBlank() }.distinct().sorted()
+            subCategories.forEach { sub ->
+                append("$sub（$major）")
+                months.forEach { mStr ->
+                    val total = items.filter { it.majorCategory.trim() == major && it.minorCategory.trim() == sub && it.date.startsWith(mStr) }
+                        .sumOf { it.priceIncludeTax }
+                    append(",$total")
+                }
+                append("\n")
+            }
+        }
+    }.toString()
+
+    // --- 2. 共有処理（ここは変更なし） ---
+    try {
+        val fileName = "analysis_matrix_${System.currentTimeMillis()}.csv"
+        val file = java.io.File(context.cacheDir, fileName)
+        file.writeText(csvContent, charset("Shift-JIS")) // Excelで開くならShift-JISが安全ですが、文字化けするならUTF-8に
+
+        val contentUri = androidx.core.content.FileProvider.getUriForFile(
+            context, "${context.packageName}.fileprovider", file
+        )
+
+        val shareIntent = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+            type = "text/csv"
+            putExtra(android.content.Intent.EXTRA_STREAM, contentUri)
+            addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        context.startActivity(android.content.Intent.createChooser(shareIntent, "分析CSVを共有"))
+    } catch (e: Exception) {
+        android.widget.Toast.makeText(context, "共有失敗: ${e.message}", android.widget.Toast.LENGTH_SHORT).show()
+    }
+
+} // ← ここが MainActivity クラスを閉じる最後のカッコです
+
+

@@ -21,7 +21,7 @@ class YearMonthAdapter {
 }
 
 // ファイル名とキー
-private const val EXPENSE_PREFS_NAME = "casheye_expenses"
+private const val ReceiptItem_PREFS_NAME = "casheye_ReceiptItems"
 private const val RECURRING_PREFS_NAME = "casheye_recurring"
 private const val KEY_CSV_DATA = "csv_data"
 private const val KEY_RECURRING_TRANSACTIONS = "recurring_transactions"
@@ -59,36 +59,38 @@ fun loadRecurringTransactions(context: Context): List<RecurringTransaction> {
 }
 
 // --- 支出データ（CSV）の保存・読み込み ---
-fun saveExpenses(context: Context, expenses: List<Expense>) {
+fun saveReceiptItems(context: Context, ReceiptItems: List<ReceiptItem>) {
     val header = "購入日,購入店舗,商品名,大分類,中分類,税抜価格,税込価格"
-    val data = expenses.joinToString("\n") {
-        "${it.date.format(DateTimeFormatter.ofPattern("yyyy/MM/dd"))},${it.store},${it.name},${it.majorCategory},${it.minorCategory},${it.priceExcludeTax},${it.priceIncludeTax}"
+    val data = ReceiptItems.joinToString("\n") {
+        // 修正後
+        "${it.date},${it.store},${it.name},${it.majorCategory},${it.minorCategory},${it.priceNet},${it.priceIncludeTax}"
     }
     val csv = "$header\n$data"
-    context.getSharedPreferences(EXPENSE_PREFS_NAME, Context.MODE_PRIVATE).edit()
+    context.getSharedPreferences(ReceiptItem_PREFS_NAME, Context.MODE_PRIVATE).edit()
         .putString(KEY_CSV_DATA, csv)
         .apply()
 }
 
-fun loadExpenses(context: Context): List<Expense> {
-    val prefs = context.getSharedPreferences(EXPENSE_PREFS_NAME, Context.MODE_PRIVATE)
+fun loadReceiptItems(context: Context): List<ReceiptItem> {
+    val prefs = context.getSharedPreferences(ReceiptItem_PREFS_NAME, Context.MODE_PRIVATE)
     return prefs.getString(KEY_CSV_DATA, null)?.let { parseCsv(it) } ?: emptyList()
 }
 
 // CSVパース（変更なし）
-fun parseCsv(csv: String): List<Expense> {
+fun parseCsv(csv: String): List<ReceiptItem> {
     val formatter = DateTimeFormatter.ofPattern("yyyy/MM/dd")
     return csv.lines().dropWhile { it.isBlank() || it.startsWith("購入日") }.mapNotNull { line ->
         val p = line.split(",")
         if (p.size < 7) return@mapNotNull null
         try {
-            Expense(
-                date = LocalDate.parse(p[0].trim(), formatter),
+            ReceiptItem(
+                // 修正後：[cite: 2026-01-05] 仕様の String型 に合わせて、そのまま渡します
+                date = p[0].trim(),
                 store = p[1].trim(),
                 name = p[2].trim(),
                 majorCategory = p[3].trim(),
                 minorCategory = p[4].trim(),
-                priceExcludeTax = p[5].trim().toInt(),
+                priceNet = p[5].trim().toInt(),
                 priceIncludeTax = p[6].trim().toInt()
             )
         } catch (e: Exception) {
