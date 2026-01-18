@@ -1,0 +1,84 @@
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.cardview.widget.CardView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:layout_marginHorizontal="8.dp"
+    android:layout_marginVertical="4.dp"
+    app:cardCornerRadius="8.dp"
+    app:cardElevation="2.dp">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="12.dp">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical">
+            <EditText
+                android:id="@+id/editName"
+                android:layout_width="0.dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:hint="商品名"
+                android:textSize="16.sp"
+                android:inputType="text"
+                android:background="@android:color/transparent" />
+            <ImageButton
+                android:id="@+id/btnDeleteRow"
+                android:layout_width="32.dp"
+                android:layout_height="32.dp"
+                android:src="@android:drawable/ic_menu_delete"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                app:tint="#FF5252" />
+        </LinearLayout>
+
+        <View android:layout_width="match_parent" android:layout_height="1dp" android:background="#EEEEEE" android:layout_marginVertical="8.dp" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="bottom">
+
+            <LinearLayout android:layout_width="0.dp" android:layout_height="wrap_content" android:layout_weight="1" android:orientation="vertical">
+                <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="税抜(円)" android:textSize="10.sp" android:textColor="#888888" />
+                <EditText android:id="@+id/editPriceNet" android:layout_width="match_parent" android:layout_height="wrap_content" android:inputType="number" android:textSize="14.sp" android:background="@android:color/transparent" />
+            </LinearLayout>
+
+            <LinearLayout android:layout_width="0.dp" android:layout_height="wrap_content" android:layout_weight="1" android:orientation="vertical">
+                <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="税込(円)" android:textSize="10.sp" android:textColor="#888888" />
+                <EditText android:id="@+id/editPriceTaxIn" android:layout_width="match_parent" android:layout_height="wrap_content" android:inputType="number" android:textSize="14.sp" android:textStyle="bold" android:background="@android:color/transparent" />
+            </LinearLayout>
+
+            <RadioGroup
+                android:id="@+id/rgTaxRate"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal">
+                <RadioButton android:id="@+id/rb8" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="8%" android:textSize="10.sp" android:padding="0.dp" />
+                <RadioButton android:id="@+id/rb10" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="10%" android:textSize="10.sp" android:padding="0.dp" />
+            </RadioGroup>
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:layout_marginTop="8.dp"
+            android:gravity="center_vertical">
+            <LinearLayout android:layout_width="0.dp" android:layout_height="wrap_content" android:layout_weight="1" android:orientation="vertical">
+                <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="大分類" android:textSize="10.sp" android:textColor="#888888" />
+                <Spinner android:id="@+id/spinnerMajorCategory" android:layout_width="match_parent" android:layout_height="wrap_content" />
+            </LinearLayout>
+            <LinearLayout android:layout_width="0.dp" android:layout_height="wrap_content" android:layout_weight="1" android:orientation="vertical">
+                <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="中分類" android:textSize="10.sp" android:textColor="#888888" />
+                <Spinner android:id="@+id/spinnerMinorCategory" android:layout_width="match_parent" android:layout_height="wrap_content" />
+            </LinearLayout>
+        </LinearLayout>
+    </LinearLayout>
+</androidx.cardview.widget.CardView>

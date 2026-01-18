@@ -84,6 +84,16 @@ dependencies {
 
     implementation("androidx.compose.material:material-icons-extended")
 
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation("org.json:json:20231013") // JSON構築用
+
+
+        // 追加する 3行
+        implementation("androidx.appcompat:appcompat:1.6.1")
+        implementation("androidx.recyclerview:recyclerview:1.3.2")
+        implementation("com.google.android.material:material:1.11.0")
+
+
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)

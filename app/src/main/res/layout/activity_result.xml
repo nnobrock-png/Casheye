@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:paddingTop="32.dp"
+    android:paddingBottom="80.dp"
+    android:paddingHorizontal="8.dp">
+
+    <androidx.cardview.widget.CardView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="8.dp"
+        app:cardCornerRadius="8.dp"
+        app:cardElevation="4.dp"> <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="12.dp">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal">
+            <EditText
+                android:id="@+id/editCommonDate"
+                android:layout_width="0.dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:hint="日付 (YYYY-MM-DD)"
+                android:inputType="date" />
+            <EditText
+                android:id="@+id/editCommonStore"
+                android:layout_width="0.dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1.5"
+                android:hint="店舗名" />
+        </LinearLayout>
+
+        <Button
+            android:id="@+id/btnSwapTax"
+            style="?android:attr/buttonStyleSmall"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8.dp"
+            android:text="税込/税抜が逆の時に一括入替" />
+    </LinearLayout>
+    </androidx.cardview.widget.CardView>
+
+    <androidx.recyclerview.widget.RecyclerView
+        android:id="@+id/recyclerView"
+        android:layout_width="match_parent"
+        android:layout_height="0.dp"
+        android:layout_weight="1" />
+
+    <Button
+        android:id="@+id/btnSave"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="この内容で家計簿に登録"
+        android:layout_marginTop="8.dp" />
+</LinearLayout>
