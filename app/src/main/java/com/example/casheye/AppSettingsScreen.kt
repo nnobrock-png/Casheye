@@ -4,12 +4,17 @@ import android.content.Context
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.casheye.utils.GeminiAnalyzer
@@ -19,6 +24,12 @@ import androidx.compose.ui.graphics.Color
 fun AppSettingsScreen() {
     val context = LocalContext.current
     val prefs = remember { context.getSharedPreferences("casheye_prefs", Context.MODE_PRIVATE) }
+
+    // --- APIキー設定の状態 ---
+    var apiKeyInput by remember {
+        mutableStateOf(prefs.getString("custom_api_key", "") ?: "")
+    }
+    var isApiKeyVisible by remember { mutableStateOf(false) }
 
     var availableModels by remember { mutableStateOf<List<String>>(emptyList()) }
     var selectedModel by remember {
@@ -31,9 +42,10 @@ fun AppSettingsScreen() {
         mutableStateOf(prefs.getString("image_quality", "Medium") ?: "Medium")
     }
 
-    LaunchedEffect(Unit) {
-        val apiKey = BuildConfig.GEMINI_API_KEY
-        val analyzer = GeminiAnalyzer(apiKey)
+    LaunchedEffect(apiKeyInput) { // キーが変更されたらモデルリストを再取得
+        isModelLoading = true
+        val finalKey = apiKeyInput.ifEmpty { BuildConfig.GEMINI_API_KEY }
+        val analyzer = GeminiAnalyzer(finalKey)
         availableModels = analyzer.fetchAvailableModels()
         isModelLoading = false
     }
@@ -44,7 +56,48 @@ fun AppSettingsScreen() {
             Spacer(Modifier.height(24.dp))
         }
 
-        // --- 1. AI解析エンジン設定 ---
+        // --- 1. API認証設定 (NEW!) ---
+        item {
+            Text("API認証設定", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.primary)
+            Card(
+                modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f))
+            ) {
+                Column(Modifier.padding(12.dp)) {
+                    Text("自身のGemini APIキーを使用する：", fontSize = 12.sp, modifier = Modifier.padding(bottom = 8.dp))
+
+                    OutlinedTextField(
+                        value = apiKeyInput,
+                        onValueChange = {
+                            apiKeyInput = it
+                            prefs.edit().putString("custom_api_key", it).apply()
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        placeholder = { Text("AI Studioで取得したキーを入力", fontSize = 14.sp) },
+                        singleLine = true,
+                        visualTransformation = if (isApiKeyVisible) VisualTransformation.None else PasswordVisualTransformation(),
+                        trailingIcon = {
+                            IconButton(onClick = { isApiKeyVisible = !isApiKeyVisible }) {
+                                Icon(
+                                    imageVector = if (isApiKeyVisible) Icons.Default.Visibility else Icons.Default.VisibilityOff,
+                                    contentDescription = null
+                                )
+                            }
+                        }
+                    )
+                    Text(
+                        "※未入力の場合はアプリ内蔵のキーを使用します。キーを変更すると利用可能なモデルリストが更新されます。",
+                        fontSize = 11.sp,
+                        color = Color.Gray,
+                        modifier = Modifier.padding(top = 4.dp)
+                    )
+                }
+            }
+        }
+
+        item { Spacer(Modifier.height(16.dp)) }
+
+        // --- 2. AI解析エンジン設定 ---
         item {
             Text("AI解析エンジン設定", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.primary)
             Card(
@@ -82,7 +135,7 @@ fun AppSettingsScreen() {
 
         item { Spacer(Modifier.height(16.dp)) }
 
-        // --- 2. 画像サイズ（解像度）設定 ---
+        // --- 3. 画像サイズ（解像度）設定 ---
         item {
             Text("解析スピード・画質設定", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.primary)
 
@@ -116,21 +169,23 @@ fun AppSettingsScreen() {
                     }
                 }
             }
-            Text("※サイズを下げると送信時間が短縮されますが、精度が落ちる場合があります。", fontSize = 11.sp, color = Color.Gray)
         }
 
         item { Spacer(Modifier.height(32.dp)) }
 
-        // --- 3. アプリ情報セクション ---
+        // --- 4. アプリ情報セクション ---
         item {
             Text("アプリについて", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.primary)
             ListItem(
                 headlineContent = { Text("バージョン") },
-                supportingContent = { Text("1.5.1 (Speed Optimized)") }
+                supportingContent = { Text("1.6.0 (BYOK Supported)") }
             )
             ListItem(
                 headlineContent = { Text("API接続状態") },
-                supportingContent = { Text("Google Gemini API: 接続済み") }
+                supportingContent = {
+                    val status = if (apiKeyInput.isNotEmpty()) "カスタムキー使用中" else "内蔵キー使用中"
+                    Text("状態: $status")
+                }
             )
         }
     }

@@ -452,7 +452,10 @@ fun CashEyeApp(modifier: Modifier = Modifier) {
                         onClick = {
                             if (isAnalyzing) return@FloatingActionButton
 
-                            // --- 1. 設定からモデル名と解像度を読み込む ---
+                            // --- 1. 設定から「カスタムキー」「モデル名」「解像度」を読み込む ---
+                            val customKey = prefs.getString("custom_api_key", "") ?: ""
+                            val finalApiKey = customKey.ifEmpty { BuildConfig.GEMINI_API_KEY }
+
                             val modelName = prefs.getString("gemini_model", "gemini-3-flash-preview") ?: "gemini-3-flash-preview"
                             val targetSize = when (prefs.getString("image_quality", "Medium")) {
                                 "Low" -> 512
@@ -466,15 +469,14 @@ fun CashEyeApp(modifier: Modifier = Modifier) {
 
                             scope.launch {
                                 try {
-                                    val apiKey = BuildConfig.GEMINI_API_KEY
-                                    val analyzer = com.example.casheye.utils.GeminiAnalyzer(apiKey, modelName)
+                                    // --- 2. 決定したキーとモデル名でAnalyzerを初期化 ---
+                                    val analyzer = com.example.casheye.utils.GeminiAnalyzer(finalApiKey, modelName)
 
-                                    // --- 2. 送信前にリサイズを実行して軽量化！ ---
+                                    // 画像をリサイズして軽量化
                                     val resizedBitmaps = capturedBitmaps.map {
                                         resizeBitmapForAnalysis(it, targetSize)
                                     }
 
-                                    // リサイズ後の画像を解析に回す
                                     val analyzedItems = analyzer.analyzeMultipleReceiptImages(resizedBitmaps)
 
                                     isAnalyzing = false
@@ -528,16 +530,35 @@ fun CashEyeApp(modifier: Modifier = Modifier) {
         }
     }
 
-    // --- ダイアログ群 (省略せず維持) ---
+    // --- ダイアログ群 (修正版) ---
     if (showExportMenu) {
         AlertDialog(
             onDismissRequest = { showExportMenu = false },
             title = { Text("CSV出力形式の選択") },
             confirmButton = {
-                TextButton(onClick = { /* 分析用共有処理 */ }) { Text("分析用 (Excel等)") }
+                TextButton(onClick = {
+                    // --- 1. 分析用（外部ソフト連携用：ID・年・月付き） ---
+                    val csvData = exportReceiptItemsToCsv(ReceiptItems)
+                    val file = saveCsvToCache(context, csvData)
+                    shareCsv(context, file)
+                    showExportMenu = false
+                }) {
+                    Text("分析用 (外部ソフト連携)")
+                }
             },
             dismissButton = {
-                TextButton(onClick = { /* バックアップ共有処理 */ }) { Text("復元用バックアップ") }
+                TextButton(onClick = {
+                    // --- 2. 復元用（CashEyeバックアップ：シンプルな7列形式） ---
+                    val csvData = exportForImportBackup(ReceiptItems)
+                    val file = saveCsvToCache(context, csvData)
+                    shareCsv(context, file)
+                    showExportMenu = false
+                }) {
+                    Text("復元用バックアップ")
+                }
+            },
+            text = {
+                Text("Excel等で詳しく分析するなら「分析用」、\nアプリのデータ移行や復元なら「復元用」を選んでください。")
             }
         )
     }
